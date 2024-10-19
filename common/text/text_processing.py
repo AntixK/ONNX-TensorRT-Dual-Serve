@@ -167,8 +167,5 @@ class TextProcessing(object):
 def get_text_processing(symbol_set, text_cleaners, p_arpabet):
     if symbol_set in ['english_basic', 'english_basic_lowercase', 'english_expanded']:
         return TextProcessing(symbol_set, text_cleaners, p_arpabet=p_arpabet)
-    elif symbol_set == 'english_mandarin_basic':
-        from common.text.zh.mandarin_text_processing import MandarinTextProcessing
-        return MandarinTextProcessing(symbol_set, text_cleaners, p_arpabet=p_arpabet)
     else:
         raise ValueError(f"No TextProcessing for symbol set {symbol_set} unknown.")
