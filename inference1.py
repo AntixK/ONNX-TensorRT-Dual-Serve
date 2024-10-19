@@ -1,17 +1,3 @@
-# Copyright (c) 2021-2022, NVIDIA CORPORATION. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#           http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import re
 import argparse
 import itertools
@@ -20,20 +6,18 @@ import time
 import warnings
 from pathlib import Path
 from tqdm import tqdm
+from box import Box
 
 import torch
 import numpy as np
 from scipy.stats import norm
 from scipy.io.wavfile import write
-from torch.nn.functional import l1_loss
+# from torch.nn.functional import l1_loss
 from torch.nn.utils.rnn import pad_sequence
 
 import dllogger as DLLogger
 from dllogger import StdOutBackend, JSONStreamBackend, Verbosity
 
-# import models
-from common.text.symbols import get_symbols, get_pad_idx
-from common.utils import DefaultAttrDict, AttrDict
 from fastpitch.model import FastPitch
 from fastpitch.model_jit import FastPitchJIT
 from hifigan.models import Generator
@@ -45,7 +29,7 @@ from common.text import cmudict
 from common.text.text_processing import get_text_processing
 from common.utils import l2_promote
 from fastpitch.pitch_transform import pitch_transform_custom
-from hifigan.data_function import MAX_WAV_VALUE, mel_spectrogram
+# from hifigan.data_function import MAX_WAV_VALUE, mel_spectrogram
 from hifigan.models import Denoiser
 
 
@@ -54,18 +38,10 @@ CHECKPOINT_SPECIFIC_ARGS = [
     'symbol_set', 'max_wav_value', 'prepend_space_to_text',
     'append_space_to_text']
 
+def load_config(config_file:Path) -> Box:
+    config = Box.from_yaml(filename=config_file)
+    return config
 
-def parse_model_args(model_name, parser, add_help=False):
-    if model_name == 'FastPitch':
-        from fastpitch import arg_parser
-        return arg_parser.parse_fastpitch_args(parser, add_help)
-
-    elif model_name == 'HiFi-GAN':
-        from hifigan import arg_parser
-        return arg_parser.parse_hifigan_args(parser, add_help)
-
-    else:
-        raise NotImplementedError(model_name)
     
 def get_model(model_name, model_config, device, bn_uniform_init=False,
               forward_is_infer=False, jitable=False):
@@ -80,7 +56,6 @@ def get_model(model_name, model_config, device, bn_uniform_init=False,
 
     elif model_name == 'HiFi-GAN':
         model = Generator(model_config)
-
     else:
         raise NotImplementedError(model_name)
 
@@ -89,117 +64,18 @@ def get_model(model_name, model_config, device, bn_uniform_init=False,
 
     return model.to(device)
 
-def get_model_config(model_name, args, ckpt_config=None):
-    """ Get config needed to instantiate the model """
+def get_model_config(model_name: str) -> dict:
+    CONFIG_FILE = Path("config.yaml")
+    config = load_config(CONFIG_FILE)
 
-    # Mark keys missing in `args` with an object (None is ambiguous)
-    _missing = object()
-    args = DefaultAttrDict(lambda: _missing, vars(args))
-
-    # `ckpt_config` is loaded from the checkpoint and has the priority
-    # `model_config` is based on args and fills empty slots in `ckpt_config`
     if model_name == 'FastPitch':
-        model_config = dict(
-            # io
-            n_mel_channels=args.n_mel_channels,
-            # symbols
-            n_symbols=(len(get_symbols(args.symbol_set))
-                       if args.symbol_set is not _missing else _missing),
-            padding_idx=(get_pad_idx(args.symbol_set)
-                         if args.symbol_set is not _missing else _missing),
-            symbols_embedding_dim=args.symbols_embedding_dim,
-            # input FFT
-            in_fft_n_layers=args.in_fft_n_layers,
-            in_fft_n_heads=args.in_fft_n_heads,
-            in_fft_d_head=args.in_fft_d_head,
-            in_fft_conv1d_kernel_size=args.in_fft_conv1d_kernel_size,
-            in_fft_conv1d_filter_size=args.in_fft_conv1d_filter_size,
-            in_fft_output_size=args.in_fft_output_size,
-            p_in_fft_dropout=args.p_in_fft_dropout,
-            p_in_fft_dropatt=args.p_in_fft_dropatt,
-            p_in_fft_dropemb=args.p_in_fft_dropemb,
-            # output FFT
-            out_fft_n_layers=args.out_fft_n_layers,
-            out_fft_n_heads=args.out_fft_n_heads,
-            out_fft_d_head=args.out_fft_d_head,
-            out_fft_conv1d_kernel_size=args.out_fft_conv1d_kernel_size,
-            out_fft_conv1d_filter_size=args.out_fft_conv1d_filter_size,
-            out_fft_output_size=args.out_fft_output_size,
-            p_out_fft_dropout=args.p_out_fft_dropout,
-            p_out_fft_dropatt=args.p_out_fft_dropatt,
-            p_out_fft_dropemb=args.p_out_fft_dropemb,
-            # duration predictor
-            dur_predictor_kernel_size=args.dur_predictor_kernel_size,
-            dur_predictor_filter_size=args.dur_predictor_filter_size,
-            p_dur_predictor_dropout=args.p_dur_predictor_dropout,
-            dur_predictor_n_layers=args.dur_predictor_n_layers,
-            # pitch predictor
-            pitch_predictor_kernel_size=args.pitch_predictor_kernel_size,
-            pitch_predictor_filter_size=args.pitch_predictor_filter_size,
-            p_pitch_predictor_dropout=args.p_pitch_predictor_dropout,
-            pitch_predictor_n_layers=args.pitch_predictor_n_layers,
-            # pitch conditioning
-            pitch_embedding_kernel_size=args.pitch_embedding_kernel_size,
-            # speakers parameters
-            n_speakers=args.n_speakers,
-            speaker_emb_weight=args.speaker_emb_weight,
-            # energy predictor
-            energy_predictor_kernel_size=args.energy_predictor_kernel_size,
-            energy_predictor_filter_size=args.energy_predictor_filter_size,
-            p_energy_predictor_dropout=args.p_energy_predictor_dropout,
-            energy_predictor_n_layers=args.energy_predictor_n_layers,
-            # energy conditioning
-            energy_conditioning=args.energy_conditioning,
-            energy_embedding_kernel_size=args.energy_embedding_kernel_size,
-        )
+        return config.model_config.fastpitch.to_dict()
     elif model_name == 'HiFi-GAN':
-        if args.hifigan_config is not None:
-            assert ckpt_config is None, (
-                "Supplied --hifigan-config, but the checkpoint has a config. "
-                "Drop the flag or remove the config from the checkpoint file.")
-            print(f'HiFi-GAN: Reading model config from {args.hifigan_config}')
-            with open(args.hifigan_config) as f:
-                args = AttrDict(json.load(f))
-
-        model_config = dict(
-            # generator architecture
-            upsample_rates=args.upsample_rates,
-            upsample_kernel_sizes=args.upsample_kernel_sizes,
-            upsample_initial_channel=args.upsample_initial_channel,
-            resblock=args.resblock,
-            resblock_kernel_sizes=args.resblock_kernel_sizes,
-            resblock_dilation_sizes=args.resblock_dilation_sizes,
-        )
-    # elif model_name == 'WaveGlow':
-    #     model_config = dict(
-    #         n_mel_channels=args.n_mel_channels,
-    #         n_flows=args.flows,
-    #         n_group=args.groups,
-    #         n_early_every=args.early_every,
-    #         n_early_size=args.early_size,
-    #         WN_config=dict(
-    #             n_layers=args.wn_layers,
-    #             kernel_size=args.wn_kernel_size,
-    #             n_channels=args.wn_channels
-    #         )
-    #     )
+        return config.model_config.hifigan.to_dict()
     else:
         raise NotImplementedError(model_name)
 
-    # Start with ckpt_config, and fill missing keys from model_config
-    final_config = {} if ckpt_config is None else ckpt_config.copy()
-    missing_keys = set(model_config.keys()) - set(final_config.keys())
-    final_config.update({k: model_config[k] for k in missing_keys})
-
-    # If there was a ckpt_config, it should have had all args
-    if ckpt_config is not None and len(missing_keys) > 0:
-        print(f'WARNING: Keys {missing_keys} missing from the loaded config; '
-              'using args instead.')
-
-    assert all(v is not _missing for v in final_config.values())
-    return final_config
-
-def load_model_from_ckpt(checkpoint_data, model, key='state_dict'):
+def load_model_from_ckpt(checkpoint_data, model, key:str='state_dict') -> tuple:
 
     if key is None:
         return checkpoint_data['model'], None
@@ -207,7 +83,7 @@ def load_model_from_ckpt(checkpoint_data, model, key='state_dict'):
     sd = checkpoint_data[key]
     sd = {re.sub('^module\.', '', k): v for k, v in sd.items()}
     status = model.load_state_dict(sd, strict=False)
-    return model, status
+    return (model, status)
 
 
 def load_and_setup_model(model_name, parser, checkpoint, amp, device,
@@ -224,11 +100,7 @@ def load_and_setup_model(model_name, parser, checkpoint, amp, device,
         ckpt_config = None
         ckpt_data = {}
 
-    model_parser = parse_model_args(model_name, parser, add_help=False)
-    model_args, model_unk_args = model_parser.parse_known_args()
-    unk_args[:] = list(set(unk_args) & set(model_unk_args))
-
-    model_config = get_model_config(model_name, model_args, ckpt_config)
+    model_config = get_model_config(model_name)
 
     model = get_model(model_name, model_config, device,
                       forward_is_infer=forward_is_infer,
@@ -238,27 +110,7 @@ def load_and_setup_model(model_name, parser, checkpoint, amp, device,
         key = 'generator' if model_name == 'HiFi-GAN' else 'state_dict'
         model, status = load_model_from_ckpt(ckpt_data, model, key)
 
-        missing = [] if status is None else status.missing_keys
-        unexpected = [] if status is None else status.unexpected_keys
-
-        # Attention is only used during training, we won't miss it
-        if model_name == 'FastPitch':
-            missing = [k for k in missing if not k.startswith('attention.')]
-            unexpected = [k for k in unexpected if not k.startswith('attention.')]
-
-        assert len(missing) == 0 and len(unexpected) == 0, (
-            f'Mismatched keys when loading parameters. Missing: {missing}, '
-            f'unexpected: {unexpected}.')
-
-    # if model_name == "WaveGlow":
-    #     for k, m in model.named_modules():
-    #         m._non_persistent_buffers_set = set()  # pytorch 1.6.0 compatability
-    #     model = model.remove_weightnorm(model)
-
     if model_name == 'HiFi-GAN':
-        assert model_args.hifigan_config is not None or ckpt_config is not None, (
-            'Use a HiFi-GAN checkpoint from NVIDIA DeepLearningExamples with '
-            'saved config or supply --hifigan-config <json_file>.')
         model.remove_weight_norm()
 
     if amp:
@@ -302,10 +154,6 @@ def parse_args(parser):
     parser.add_argument('--fastpitch', type=str, default=None, required=False,
                         help='Full path to the spectrogram generator .pt file '
                              '(skip to synthesize from ground truth mels)')
-    # parser.add_argument('--waveglow', type=str, default=None, required=False,
-    #                     help='Full path to a WaveGlow model .pt file')
-    # parser.add_argument('-s', '--waveglow-sigma-infer', default=0.9, type=float,
-    #                     help='WaveGlow sigma')
     parser.add_argument('--hifigan', type=str, default=None, required=False,
                         help='Full path to a HiFi-GAN model .pt file')
     parser.add_argument('-d', '--denoising-strength', default=0.0, type=float,
@@ -390,9 +238,12 @@ def load_fields(fpath):
     return {c: f for c, f in zip(columns, fields)}
 
 
-def prepare_input_sequence(fields, device, symbol_set, text_cleaners,
-                           batch_size=128, dataset=None, load_mels=False,
-                           load_pitch=False, p_arpabet=0.0):
+def prepare_input_sequence(fields, 
+                           device, 
+                           symbol_set, 
+                           text_cleaners,
+                           batch_size=128, 
+                           p_arpabet=0.0):
     tp = get_text_processing(symbol_set, text_cleaners, p_arpabet)
 
     fields['text'] = [torch.LongTensor(tp.encode_text(text))
@@ -401,22 +252,6 @@ def prepare_input_sequence(fields, device, symbol_set, text_cleaners,
 
     fields['text'] = [fields['text'][i] for i in order]
     fields['text_lens'] = torch.LongTensor([t.size(0) for t in fields['text']])
-
-    # for t in fields['text']:
-    #     print(tp.sequence_to_text(t.numpy()))
-
-    if load_mels:
-        assert 'mel' in fields
-        assert dataset is not None
-        fields['mel'] = [
-            torch.load(Path(dataset, fields['mel'][i])).t() for i in order]
-        fields['mel_lens'] = torch.LongTensor([t.size(0) for t in fields['mel']])
-
-    if load_pitch:
-        assert 'pitch' in fields
-        fields['pitch'] = [
-            torch.load(Path(dataset, fields['pitch'][i])) for i in order]
-        fields['pitch_lens'] = torch.LongTensor([t.size(0) for t in fields['pitch']])
 
     if 'output' in fields:
         fields['output'] = [fields['output'][i] for i in order]
@@ -427,10 +262,6 @@ def prepare_input_sequence(fields, device, symbol_set, text_cleaners,
         batch = {f: values[b:b+batch_size] for f, values in fields.items()}
         for f in batch:
             if f == 'text':
-                batch[f] = pad_sequence(batch[f], batch_first=True)
-            elif f == 'mel' and load_mels:
-                batch[f] = pad_sequence(batch[f], batch_first=True).permute(0, 2, 1)
-            elif f == 'pitch' and load_pitch:
                 batch[f] = pad_sequence(batch[f], batch_first=True)
 
             if type(batch[f]) is torch.Tensor:
@@ -463,37 +294,6 @@ def build_pitch_transformation(args):
         return None
 
     return eval(f'lambda pitch, pitch_lens, mean, std: {fun}')
-
-
-def setup_mel_loss_reporting(args, voc_train_setup):
-    if args.denoising_strength > 0.0:
-        print('WARNING: denoising will be included in vocoder mel loss')
-    num_mels = voc_train_setup.get('num_mels', 80)
-    fmin = voc_train_setup.get('mel_fmin', 0)
-    fmax = voc_train_setup.get('mel_fmax', 8000)  # not mel_fmax_loss
-
-    def compute_audio_mel_loss(gen_audios, gt_mels, mel_lens):
-        gen_audios /= MAX_WAV_VALUE
-        total_loss = 0
-        for gen_audio, gt_mel, mel_len in zip(gen_audios, gt_mels, mel_lens):
-            mel_len = mel_len.item()
-            gen_audio = gen_audio[None, :mel_len * args.hop_length]
-            gen_mel = mel_spectrogram(gen_audio, args.win_length, num_mels,
-                                      args.sampling_rate, args.hop_length,
-                                      args.win_length, fmin, fmax)[0]
-            total_loss += l1_loss(gen_mel, gt_mel[:, :mel_len])
-        return total_loss.item()
-
-    return compute_audio_mel_loss
-
-
-def compute_mel_loss(mels, lens, gt_mels, gt_lens):
-    total_loss = 0
-    for mel, len_, gt_mel, gt_len in zip(mels, lens, gt_mels, gt_lens):
-        min_len = min(len_, gt_len)
-        total_loss += l1_loss(gt_mel[:, :min_len], mel[:, :min_len])
-    return total_loss.item()
-
 
 class MeasureTime(list):
     def __init__(self, *args, cuda=True, **kwargs):
@@ -542,6 +342,7 @@ def main():
         Path(args.output).mkdir(parents=False, exist_ok=True)
 
     log_fpath = args.log_file or str(Path(args.output, 'nvlog_infer.json'))
+
     DLLogger.init(backends=[
         JSONStreamBackend(Verbosity.DEFAULT, log_fpath, append=True),
         JSONStreamBackend(Verbosity.DEFAULT, unique_log_fpath(log_fpath)),
@@ -569,44 +370,26 @@ def main():
         "Specify a single vocoder model"
     
     def _load_pyt_or_ts_model(model_name, ckpt_path):
-        if args.checkpoint_format == 'ts':
-            model = load_and_setup_ts_model(model_name, ckpt_path,
-                                                   args.amp, device)
-            model_train_setup = {}
-            return model, model_train_setup
+
+        print(f"Checkpoint format: {model_name}, {args.checkpoint_format}")
+        # if args.checkpoint_format == 'ts':
+        #     model = load_and_setup_ts_model(model_name, ckpt_path,
+        #                                            args.amp, device)
+        #     model_train_setup = {}
+        #     return model, model_train_setup
         model, _, model_train_setup = load_and_setup_model(
             model_name, parser, ckpt_path, args.amp, device,
             unk_args=unk_args, forward_is_infer=True, jitable=is_ts_based_infer)
 
-        if is_ts_based_infer:
-            model = torch.jit.script(model)
+        # if is_ts_based_infer:
+        #     model = torch.jit.script(model)
         return model, model_train_setup
 
     if args.fastpitch is not None:
         gen_name = 'fastpitch'
         generator, gen_train_setup = _load_pyt_or_ts_model('FastPitch',
                                                            args.fastpitch)
-    # if args.waveglow is not None:
-    #     voc_name = 'waveglow'
-    #     with warnings.catch_warnings():
-    #         warnings.simplefilter("ignore")
-    #         vocoder, _, voc_train_setup = models.load_and_setup_model(
-    #             'WaveGlow', parser, args.waveglow, args.amp, device,
-    #             unk_args=unk_args, forward_is_infer=True, jitable=False)
 
-    #     if args.denoising_strength > 0.0:
-    #         denoiser = Denoiser(vocoder, sigma=0.0,
-    #                             win_length=args.win_length).to(device)
-
-    #     # if args.torchscript:
-    #     #     vocoder = torch.jit.script(vocoder)
-
-    #     def generate_audio(mel):
-    #         audios = vocoder(mel, sigma=args.waveglow_sigma_infer)
-    #         if denoiser is not None:
-    #             audios = denoiser(audios.float(), args.denoising_strength).squeeze(1)
-    #         return audios
-        
     if args.hifigan is not None:
         voc_name = 'hifigan'
         vocoder, voc_train_setup = _load_pyt_or_ts_model('HiFi-GAN',
@@ -628,21 +411,6 @@ def main():
     if len(unk_args) > 0:
         raise ValueError(f'Invalid options {unk_args}')
 
-    for k in CHECKPOINT_SPECIFIC_ARGS:
-
-        v1 = gen_train_setup.get(k, None)
-        v2 = voc_train_setup.get(k, None)
-
-        assert v1 is None or v2 is None or v1 == v2, \
-            f'{k} mismatch in spectrogram generator and vocoder'
-
-        val = v1 or v2
-        if val and getattr(args, k) != val:
-            src = 'generator' if v2 is None else 'vocoder'
-            print(f'Overwriting args.{k}={getattr(args, k)} with {val} '
-                  f'from {src} checkpoint.')
-            setattr(args, k, val)
-
     gen_kw = {'pace': args.pace,
               'speaker': args.speaker,
               'pitch_tgt': None,
@@ -656,15 +424,13 @@ def main():
     if args.p_arpabet > 0.0:
         cmudict.initialize(args.cmudict_path, args.heteronyms_path)
 
-    if args.report_mel_loss:
-        mel_loss_fn = setup_mel_loss_reporting(args, voc_train_setup)
-
+    # Prepare data
     fields = load_fields(args.input)
     batches = prepare_input_sequence(
         fields, device, args.symbol_set, args.text_cleaners, args.batch_size,
-        args.dataset_path, load_mels=(generator is None or args.report_mel_loss),
         p_arpabet=args.p_arpabet)
 
+    # Do warmup
     cycle = itertools.cycle(batches)
     # Use real data rather than synthetic - FastPitch predicts len
     for _ in tqdm(range(args.warmup_steps), 'Warmup'):
@@ -697,60 +463,42 @@ def main():
     for rep in (tqdm(range(reps), 'Inference') if reps > 1 else range(reps)):
         for b in batches:
 
-            if generator is None:
-                mel, mel_lens = b['mel'], b['mel_lens']
-                if args.amp:
-                    mel = mel.half()
-            else:
-                with torch.no_grad(), gen_measures:
-                    mel, mel_lens, *_ = generator(b['text'], **gen_kw)
+            # Generate mel spectrograms from FastPitch
+            with torch.no_grad(), gen_measures:
+                mel, mel_lens, *_ = generator(b['text'], **gen_kw)
 
-                if args.report_mel_loss:
-                    gen_mel_loss_sum += compute_mel_loss(
-                        mel, mel_lens, b['mel'], b['mel_lens'])
+            gen_infer_perf = mel.size(0) * mel.size(2) / gen_measures[-1]
+            all_letters += b['text_lens'].sum().item()
+            all_frames += mel.size(0) * mel.size(2)
+            log(rep, {f"{gen_name}_frames/s": gen_infer_perf})
+            log(rep, {f"{gen_name}_latency": gen_measures[-1]})
 
-                gen_infer_perf = mel.size(0) * mel.size(2) / gen_measures[-1]
-                all_letters += b['text_lens'].sum().item()
-                all_frames += mel.size(0) * mel.size(2)
-                log(rep, {f"{gen_name}_frames/s": gen_infer_perf})
-                log(rep, {f"{gen_name}_latency": gen_measures[-1]})
+            # Generate audio from mel spectrograms using Hifigan vocoder
+            with torch.no_grad(), vocoder_measures:
+                audios = generate_audio(mel)
 
-                if args.save_mels:
-                    for i, mel_ in enumerate(mel):
-                        m = mel_[:, :mel_lens[i].item()].permute(1, 0)
-                        fname = b['output'][i] if 'output' in b else f'mel_{i}.npy'
-                        mel_path = Path(args.output, Path(fname).stem + '.npy')
-                        np.save(mel_path, m.cpu().numpy())
+            vocoder_infer_perf = (
+                audios.size(0) * audios.size(1) / vocoder_measures[-1])
 
-            if vocoder is not None:
-                with torch.no_grad(), vocoder_measures:
-                    audios = generate_audio(mel)
+            log(rep, {f"{voc_name}_samples/s": vocoder_infer_perf})
+            log(rep, {f"{voc_name}_latency": vocoder_measures[-1]})
 
-                vocoder_infer_perf = (
-                    audios.size(0) * audios.size(1) / vocoder_measures[-1])
+            if args.output is not None and reps == 1:
+                for i, audio in enumerate(audios):
+                    audio = audio[:mel_lens[i].item() * args.hop_length]
 
-                log(rep, {f"{voc_name}_samples/s": vocoder_infer_perf})
-                log(rep, {f"{voc_name}_latency": vocoder_measures[-1]})
+                    if args.fade_out:
+                        fade_len = args.fade_out * args.hop_length
+                        fade_w = torch.linspace(1.0, 0.0, fade_len)
+                        audio[-fade_len:] *= fade_w.to(audio.device)
 
-                if args.report_mel_loss:
-                    voc_mel_loss_sum += mel_loss_fn(audios, mel, mel_lens)
+                    audio = audio / torch.max(torch.abs(audio))
+                    fname = b['output'][i] if 'output' in b else f'audio_{all_utterances + i}.wav'
+                    audio_path = Path(args.output, fname)
+                    write(audio_path, args.sampling_rate, audio.cpu().numpy())
 
-                if args.output is not None and reps == 1:
-                    for i, audio in enumerate(audios):
-                        audio = audio[:mel_lens[i].item() * args.hop_length]
-
-                        if args.fade_out:
-                            fade_len = args.fade_out * args.hop_length
-                            fade_w = torch.linspace(1.0, 0.0, fade_len)
-                            audio[-fade_len:] *= fade_w.to(audio.device)
-
-                        audio = audio / torch.max(torch.abs(audio))
-                        fname = b['output'][i] if 'output' in b else f'audio_{all_utterances + i}.wav'
-                        audio_path = Path(args.output, fname)
-                        write(audio_path, args.sampling_rate, audio.cpu().numpy())
-
-                if generator is not None:
-                    log(rep, {"latency": (gen_measures[-1] + vocoder_measures[-1])})
+            # if generator is not None:
+            log(rep, {"latency": (gen_measures[-1] + vocoder_measures[-1])})
 
             all_utterances += mel.size(0)
             all_samples += mel_lens.sum().item() * args.hop_length

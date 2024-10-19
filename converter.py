@@ -54,7 +54,6 @@ h = Generator(config.model_config.hifigan)
 if hasattr(h, 'infer'):
     h.forward = h.infer
 
-print(h.state_dict().keys())
 
 # Load the checkpoints
 # print(CHECKPOINT_DIR / config.checkpoint_config.fastpitch)

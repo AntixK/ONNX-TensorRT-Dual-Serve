@@ -8,7 +8,7 @@ export TORCH_CUDNN_V8_API_ENABLED=1
 : ${FILELIST:="phrases/devset10.tsv"}
 : ${AMP:=false}
 : ${TORCHSCRIPT:=false}
-: ${WARMUP:=0}
+: ${WARMUP:=10}
 : ${REPEATS:=1}
 : ${CPU:=false}
 : ${PHONE:=true}
@@ -56,7 +56,7 @@ mkdir -p "$OUTPUT_DIR"
 echo -e "\nAMP=$AMP, batch_size=$BATCH_SIZE\n"
 
 ARGS+=" --cuda"
-ARGS+=" --dataset-path $DATASET_DIR"
+# ARGS+=" --dataset-path $DATASET_DIR"
 ARGS+=" -i $FILELIST"
 ARGS+=" -o $OUTPUT_DIR"
 ARGS+=" --log-file $LOG_FILE"
