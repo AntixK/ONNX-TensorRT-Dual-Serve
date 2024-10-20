@@ -28,7 +28,7 @@ from common.tb_dllogger import (init_inference_metadata, stdout_metric_format,
 from common.text import cmudict
 from common.text.text_processing import get_text_processing
 from common.utils import l2_promote
-from fastpitch.pitch_transform import pitch_transform_custom
+# from fastpitch.pitch_transform import pitch_transform_custom
 # from hifigan.data_function import MAX_WAV_VALUE, mel_spectrogram
 from hifigan.models import Denoiser
 
@@ -86,8 +86,8 @@ def load_model_from_ckpt(checkpoint_data, model, key:str='state_dict') -> tuple:
     return (model, status)
 
 
-def load_and_setup_model(model_name, parser, checkpoint, amp, device,
-                         unk_args=[], forward_is_infer=False, jitable=False):
+def load_and_setup_model(model_name:str, checkpoint, amp, device,
+                         forward_is_infer=False, jitable=False):
     if checkpoint is not None:
         ckpt_data = torch.load(checkpoint)
         print(f'{model_name}: Loading {checkpoint}...')
@@ -137,17 +137,17 @@ def parse_args(parser):
     """
     Parse commandline arguments.
     """
-    parser.add_argument('-i', '--input', type=str, required=True,
+    parser.add_argument('-i', '--input-file', type=str, required=True,
                         help='Full path to the input text (phareses separated by newlines)')
-    parser.add_argument('-o', '--output', default=None,
+    parser.add_argument('-o', '--output-dir', default=None,
                         help='Output folder to save audio (file per phrase)')
     parser.add_argument('--log-file', type=str, default=None,
                         help='Path to a DLLogger log file')
     parser.add_argument('--save-mels', action='store_true',
                         help='Save generator outputs to disk')
-    parser.add_argument('--cuda', action='store_true',
+    parser.add_argument('--use-cuda', action='store_true',
                         help='Run inference on a GPU using CUDA')
-    parser.add_argument('--cudnn-benchmark', action='store_true',
+    parser.add_argument('--use-cudnn-benchmark', action='store_true',
                         help='Enable cudnn benchmark mode')
     parser.add_argument('--l2-promote', action='store_true',
                         help='Increase max fetch granularity of GPU L2 cache')
@@ -160,18 +160,18 @@ def parse_args(parser):
                         help='Capture and subtract model bias to enhance audio')
     parser.add_argument('--hop-length', type=int, default=256,
                         help='STFT hop length for estimating audio length from mel size')
-    parser.add_argument('--win-length', type=int, default=1024,
+    parser.add_argument('--window-length', type=int, default=1024,
                         help='STFT win length for denoiser and mel loss')
     parser.add_argument('-sr', '--sampling-rate', default=22050, type=int,
                         choices=[22050, 44100], help='Sampling rate')
     parser.add_argument('--max_wav_value', default=32768.0, type=float,
                         help='Maximum audiowave value')
-    parser.add_argument('--amp', action='store_true',
+    parser.add_argument('--use-amp', action='store_true',
                         help='Inference with AMP')
     parser.add_argument('-bs', '--batch-size', type=int, default=64)
     parser.add_argument('--warmup-steps', type=int, default=0,
                         help='Warmup iterations before measuring performance')
-    parser.add_argument('--repeats', type=int, default=1,
+    parser.add_argument('--num-repeats', type=int, default=1,
                         help='Repeat inference for benchmarking')
     parser.add_argument('--torchscript', action='store_true',
                         help='Run inference with TorchScript model (convert to TS if needed)')
@@ -186,7 +186,7 @@ def parse_args(parser):
                         help='Use EMA averaged model (if saved in checkpoints)')
     parser.add_argument('--dataset-path', type=str,
                         help='Path to dataset (for loading extra data fields)')
-    parser.add_argument('--speaker', type=int, default=0,
+    parser.add_argument('--speaker-id', type=int, default=0,
                         help='Speaker ID for a multi-speaker model')
 
     parser.add_argument('--affinity', type=str, default='single',
@@ -195,23 +195,8 @@ def parse_args(parser):
                                  'socket_unique_continuous',
                                  'disabled'],
                         help='type of CPU affinity')
-
-    transf = parser.add_argument_group('transform')
-    transf.add_argument('--fade-out', type=int, default=10,
-                        help='Number of fadeout frames at the end')
-    transf.add_argument('--pace', type=float, default=1.0,
+    parser.add_argument('--pace', type=float, default=1.0,
                         help='Adjust the pace of speech')
-    transf.add_argument('--pitch-transform-flatten', action='store_true',
-                        help='Flatten the pitch')
-    transf.add_argument('--pitch-transform-invert', action='store_true',
-                        help='Invert the pitch wrt mean value')
-    transf.add_argument('--pitch-transform-amplify', type=float, default=1.0,
-                        help='Multiplicative amplification of pitch variability. '
-                             'Typical values are in the range (1.0, 3.0).')
-    transf.add_argument('--pitch-transform-shift', type=float, default=0.0,
-                        help='Raise/lower the pitch by <hz>')
-    transf.add_argument('--pitch-transform-custom', action='store_true',
-                        help='Apply the transform from pitch_transform.py')
 
     txt = parser.add_argument_group('Text processing parameters')
     txt.add_argument('--text-cleaners', type=str, nargs='*',
@@ -225,6 +210,11 @@ def parse_args(parser):
     txt.add_argument('--cmudict-path', type=str,
                      default='cmudict/cmudict-0.7b', help='')
     return parser
+
+def get_args():
+    config = load_config(Path("config.yaml"))
+
+    return config.inference
 
 
 def load_fields(fpath):
@@ -271,30 +261,6 @@ def prepare_input_sequence(fields,
     return batches
 
 
-def build_pitch_transformation(args):
-    if args.pitch_transform_custom:
-        def custom_(pitch, pitch_lens, mean, std):
-            return (pitch_transform_custom(pitch * std + mean, pitch_lens)
-                    - mean) / std
-        return custom_
-
-    fun = 'pitch'
-    if args.pitch_transform_flatten:
-        fun = f'({fun}) * 0.0'
-    if args.pitch_transform_invert:
-        fun = f'({fun}) * -1.0'
-    if args.pitch_transform_amplify != 1.0:
-        ampl = args.pitch_transform_amplify
-        fun = f'({fun}) * {ampl}'
-    if args.pitch_transform_shift != 0.0:
-        hz = args.pitch_transform_shift
-        fun = f'({fun}) + {hz} / std'
-
-    if fun == 'pitch':
-        return None
-
-    return eval(f'lambda pitch, pitch_lens, mean, std: {fun}')
-
 class MeasureTime(list):
     def __init__(self, *args, cuda=True, **kwargs):
         super(MeasureTime, self).__init__(*args, **kwargs)
@@ -319,10 +285,12 @@ def main():
     """
     Launches text-to-speech inference on a single GPU.
     """
-    parser = argparse.ArgumentParser(description='PyTorch FastPitch Inference',
-                                     allow_abbrev=False)
-    parser = parse_args(parser)
-    args, unk_args = parser.parse_known_args()
+    # parser = argparse.ArgumentParser(description='PyTorch FastPitch Inference',
+    #                                  allow_abbrev=False)
+    # parser = parse_args(parser)
+    # args, unk_args = parser.parse_known_args()
+
+    args = get_args()
 
     if args.affinity != 'disabled':
         nproc_per_node = torch.cuda.device_count()
@@ -336,12 +304,12 @@ def main():
 
     if args.l2_promote:
         l2_promote()
-    torch.backends.cudnn.benchmark = args.cudnn_benchmark
+    torch.backends.cudnn.benchmark = args.use_cudnn_benchmark
 
-    if args.output is not None:
-        Path(args.output).mkdir(parents=False, exist_ok=True)
+    if args.output_dir is not None:
+        Path(args.output_dir).mkdir(parents=False, exist_ok=True)
 
-    log_fpath = args.log_file or str(Path(args.output, 'nvlog_infer.json'))
+    log_fpath = str(Path(args.output_dir, 'nvlog_infer.json'))
 
     DLLogger.init(backends=[
         JSONStreamBackend(Verbosity.DEFAULT, log_fpath, append=True),
@@ -349,37 +317,32 @@ def main():
         StdOutBackend(Verbosity.VERBOSE, metric_format=stdout_metric_format)
     ])
     init_inference_metadata(args.batch_size)
-    [DLLogger.log("PARAMETER", {k: v}) for k, v in vars(args).items()]
+    # [DLLogger.log("PARAMETER", {k: v}) for k, v in vars(args).items()]
 
-    device = torch.device('cuda' if args.cuda else 'cpu')
+    device = torch.device('cuda' if args.use_cuda else 'cpu')
 
-    gen_train_setup = {}
-    voc_train_setup = {}
     generator = None
     vocoder = None
     denoiser = None
 
-    is_ts_based_infer = args.torch_tensorrt or args.torchscript
+    # is_ts_based_infer = args.torch_tensorrt or args.torchscript
+    is_ts_based_infer = False
 
-    assert args.checkpoint_format == 'pyt' or is_ts_based_infer, \
-        'TorchScript checkpoint can be used only for TS or Torch-TRT' \
-        ' inference. Please set --torchscript or --torch-tensorrt flag.'
+    # assert args.checkpoint_format == 'pyt' or is_ts_based_infer, \
+    #     'TorchScript checkpoint can be used only for TS or Torch-TRT' \
+    #     ' inference. Please set --torchscript or --torch-tensorrt flag.'
 
-    # print(args.waveglow, args.hifigan)
-    assert args.hifigan is not None, \
-        "Specify a single vocoder model"
     
     def _load_pyt_or_ts_model(model_name, ckpt_path):
 
-        print(f"Checkpoint format: {model_name}, {args.checkpoint_format}")
+        # print(f"Checkpoint format: {model_name}, {args.checkpoint_format}")
         # if args.checkpoint_format == 'ts':
         #     model = load_and_setup_ts_model(model_name, ckpt_path,
         #                                            args.amp, device)
         #     model_train_setup = {}
         #     return model, model_train_setup
         model, _, model_train_setup = load_and_setup_model(
-            model_name, parser, ckpt_path, args.amp, device,
-            unk_args=unk_args, forward_is_infer=True, jitable=is_ts_based_infer)
+            model_name, ckpt_path, args.use_amp, device, forward_is_infer=True, jitable=is_ts_based_infer)
 
         # if is_ts_based_infer:
         #     model = torch.jit.script(model)
@@ -396,7 +359,7 @@ def main():
                                                          args.hifigan)
 
         if args.denoising_strength > 0.0:
-            denoiser = Denoiser(vocoder, win_length=args.win_length).to(device)
+            denoiser = Denoiser(vocoder, win_length=args.window_length).to(device)
 
         # if args.torch_tensorrt:
         #     vocoder = convert_ts_to_trt('HiFi-GAN', vocoder, parser,
@@ -408,24 +371,17 @@ def main():
                 audios = denoiser(audios.squeeze(1), args.denoising_strength)
             return audios.squeeze(1) * args.max_wav_value
 
-    if len(unk_args) > 0:
-        raise ValueError(f'Invalid options {unk_args}')
-
-    gen_kw = {'pace': args.pace,
-              'speaker': args.speaker,
-              'pitch_tgt': None,
-              'pitch_transform': build_pitch_transformation(args)}
-
-    if is_ts_based_infer and generator is not None:
-        gen_kw.pop('pitch_transform')
-        print('Note: --pitch-transform-* args are disabled with TorchScript. '
-              'To condition on pitch, pass pitch_tgt as input.')
-
     if args.p_arpabet > 0.0:
         cmudict.initialize(args.cmudict_path, args.heteronyms_path)
 
+    gen_kw = {'pace': args.pace,
+              'speaker': args.speaker_id,
+              'pitch_tgt': None,
+              'pitch_transform': None}
+
+
     # Prepare data
-    fields = load_fields(args.input)
+    fields = load_fields(args.input_file)
     batches = prepare_input_sequence(
         fields, device, args.symbol_set, args.text_cleaners, args.batch_size,
         p_arpabet=args.p_arpabet)
@@ -440,13 +396,13 @@ def main():
                 mel, *_ = generator(b['text'])
             else:
                 mel, mel_lens = b['mel'], b['mel_lens']
-                if args.amp:
+                if args.use_amp:
                     mel = mel.half()
             if vocoder is not None:
                 audios = generate_audio(mel)
 
-    gen_measures = MeasureTime(cuda=args.cuda)
-    vocoder_measures = MeasureTime(cuda=args.cuda)
+    gen_measures = MeasureTime(cuda=args.use_cuda)
+    vocoder_measures = MeasureTime(cuda=args.use_cuda)
 
     all_utterances = 0
     all_samples = 0
@@ -456,7 +412,7 @@ def main():
     gen_mel_loss_sum = 0
     voc_mel_loss_sum = 0
 
-    reps = args.repeats
+    reps = args.num_repeats
     log_enabled = reps == 1
     log = lambda s, d: DLLogger.log(step=s, data=d) if log_enabled else None
 
@@ -483,7 +439,7 @@ def main():
             log(rep, {f"{voc_name}_samples/s": vocoder_infer_perf})
             log(rep, {f"{voc_name}_latency": vocoder_measures[-1]})
 
-            if args.output is not None and reps == 1:
+            if args.output_dir is not None and reps == 1:
                 for i, audio in enumerate(audios):
                     audio = audio[:mel_lens[i].item() * args.hop_length]
 
@@ -494,7 +450,7 @@ def main():
 
                     audio = audio / torch.max(torch.abs(audio))
                     fname = b['output'][i] if 'output' in b else f'audio_{all_utterances + i}.wav'
-                    audio_path = Path(args.output, fname)
+                    audio_path = Path(args.output_dir, fname)
                     write(audio_path, args.sampling_rate, audio.cpu().numpy())
 
             # if generator is not None:

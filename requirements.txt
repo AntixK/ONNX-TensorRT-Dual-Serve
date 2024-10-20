@@ -1,1 +1,6 @@
+git+https://github.com/NVIDIA/dllogger@v1.0.0#egg=dllogger
+python-box
+numpy
+scipy
 inflect
+loguru

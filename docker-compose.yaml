@@ -1,5 +1,3 @@
-version: '3'
-
 services:
   dev:
     container_name: dev
@@ -18,22 +16,16 @@ services:
         source: .
         target: /home/
 
-    networks:
-      - default_network
-
     deploy:
       resources:
-        limits:
-          memory: 12g
         reservations:
           devices:
-            - capabilities: [ gpu ]
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - JUPYTER_ENABLE_LAB=yes
       - NVIDIA_DRIVER_CAPABILITIES=all
-      # - MLFLOW_TRACKING_URI=/share/sections/perception/work/DeltaNet/training_logs/mlruns/
-    shm_size: "8gb"
 
-networks:
-  default_network:
+    shm_size: "8gb"
