@@ -4,11 +4,18 @@ import numpy as np
 from scipy.io.wavfile import write
 from loguru import logger
 from pathlib import Path
+import torch
 
 URL = "http://localhost:7008/predict"
-payload = {"text": "I love this product"}
+
+with open("text.txt", "r") as f:
+    text = f.readlines()
+
+payload = {"text": text[0]}
+
 output_dir = Path("output")
 output_dir.mkdir(exist_ok=True)
+
 
 logger.info(f"Sending request to {URL}")
 response = requests.post(URL, json=payload)

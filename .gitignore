@@ -170,3 +170,4 @@ phrases/
 pretrained_models/
 cmudict/
 output/
+logs/

@@ -1,6 +1,7 @@
 import re
 import itertools
 import time
+import sys
 import warnings
 from pathlib import Path
 from tqdm.auto import tqdm
@@ -238,6 +239,18 @@ class Text2Speech:
                                          self.args.text_cleaners,
                                          self.args.p_arpabet)
 
+        # Initilize measurement trackers
+        self.gen_measures = MeasureTime(cuda=self.args.use_cuda)
+        self.voc_measures = MeasureTime(cuda=self.args.use_cuda)
+
+
+
+        # logger.remove(0)
+        # log_format = "<green>{time:YYYY-MM-DD HH:mm:ss.SSS zz}</green> | <level>{level: <8}</level> | <b>{message}</b>"
+        # # logger.add(sys.stdout, level="INFO", format=log_format, colorize=True, backtrace=True, diagnose=True)
+
+        # logger.add(f"{self.args.log_dir}/time.log", level="INFO", format=log_format, colorize=False, backtrace=True, diagnose=True)
+
     def preprocess_text(self, text: str) -> torch.Tensor:
         """
         Preprocess the input text by encoding it into tensor.
@@ -249,13 +262,8 @@ class Text2Speech:
             Tuple: Tuple of encoded text tensor and text lengths tensor.
         """
         encoded_text = [torch.LongTensor(self.tp.encode_text(text))]
-
-        # order = np.argsort([-t.size(0) for t in encoded_text])
-        # encoded_text = [encoded_text[i] for i in order]
-        # text_lens = torch.LongTensor([t.size(0) for t in encoded_text])
         encoded_text = pad_sequence(encoded_text, batch_first=True)
         return encoded_text
-
 
     def postprocess(self,
                     audio: torch.Tensor,
@@ -353,20 +361,27 @@ class Text2Speech:
         for _ in tqdm(range(num_warmup_steps), desc='Warmup', dynamic_ncols=True):
             b = next(batch_iter)
             mel, *_ = self.generator(b['text'], **self.gen_kw)
+            # print(b['text'].size(), mel.size())
             audios = self._generate_audio_from_mel(mel)
 
     @torch.inference_mode()
     def run(self, encoded_text: torch.Tensor) -> Tuple:
         encoded_text = encoded_text.to(self.device)
+
+        # with self.gen_measures:
         mel, mel_lens, *_ = self.generator(encoded_text, **self.gen_kw)
+
+        # with self.voc_measures:
         audios = self.vocoder(mel).float()
         audios = audios.squeeze(1) * self.args.max_wav_value
-        return (audios, mel_lens)
+
+        # logger.info(f"Generator-Inference-Time:{self.gen_measures[-1]:4.4f}s | Vocoder-Inference-Time:{self.voc_measures[-1]:4.4f}s")
+        return (audios, mel, mel_lens)
 
     @torch.inference_mode()
     def __call__(self, text:str) -> List[torch.Tensor]:
         encoded_text = self.preprocess_text(text)
-        audios, mel_lens = self.run(encoded_text)
+        audios, mel, mel_lens = self.run(encoded_text)
         res_audio = self.postprocess(audios, mel_lens)
 
         self.save_audio(res_audio)
@@ -377,19 +392,63 @@ class Text2Speech:
         return f'{self.__class__.__name__}\n(Text -> {self.generator_name} -> {self.vocoder_name} -> Audio)'
 
 
+class FileLogger(ls.Logger):
+    def process(self, key, value):
+        with open("logs/tts_server.log", "a+") as f:
+            f.write(f"{key}:{value:.4f}\n")
+
+class InferenceTimeLogger(ls.Callback):
+    def on_before_predict(self, lit_api):
+        lit_api.num_samples =0
+        lit_api.num_utterances = 0
+
+        torch.cuda.memory._record_memory_history(max_entries=1000)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        self._start_time = t0
+
+    def on_after_predict(self, lit_api):
+        torch.cuda.synchronize()
+        t1 = time.perf_counter()
+        elapsed = t1 - self._start_time
+        lit_api.log("Inference_time", elapsed)
+
+        lit_api.log("Samples", lit_api.num_samples)
+        lit_api.log("Utterances", lit_api.num_utterances)
+
+        torch.cuda.memory._dump_snapshot(f"{lit_api.log_dir}/gpu_mem_snapshot.pickle")
+        torch.cuda.memory._record_memory_history(enabled=None)
+
+    # def (self):
+
+
 class TTSServer(ls.LitAPI):
     def setup(self, device):
         config = get_args(Path("config.yaml"))
-        self. tts = Text2Speech(config)
+
+        self.log_dir = Path(config.inference.log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        self.tts = Text2Speech(config)
         self.tts.do_warmup()
+
+        # Setup latency metric
+        self.num_samples = 0
+        self.num_utterances = 0
+
+        # self.pre_measures = MeasureTime(cuda=config.inference.use_cuda)
+        # self.post_measures = MeasureTime(cuda=config.inference.use_cuda)
 
     def decode_request(self, request: dict) -> torch.Tensor:
         """
         Decode the JSON request from the client into
         text to be used by the Text2Speech model.
         """
+        # with self.pre_measures:
         text = request['text']
-        return self.tts.preprocess_text(text)
+        encoded_text = self.tts.preprocess_text(text)
+
+        return encoded_text
 
     # def batch(self, decoded_requests: torch.Tensor) -> List[str]:
     #     return decoded_requests
@@ -397,11 +456,20 @@ class TTSServer(ls.LitAPI):
     # def unbatch(self, responses):
     #     pass
 
-    def predict(self, encoded_text: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.tts.run(encoded_text)
+    def predict(self, encoded_text: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        audio, mel, mel_lens = self.tts.run(encoded_text)
 
-    def encode_response(self, model_output: Tuple[torch.Tensor, torch.Tensor]) -> dict:
-        audio, mel_lens = model_output
+        # Update throughput tracker
+        self.num_samples = mel_lens.sum().item() * self.tts.args.hop_length
+        self.num_utterances = mel.size(0)
+
+        # print(encoded_text.size(), mel.size())
+        return (audio, mel, mel_lens)
+
+    def encode_response(self, model_output: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> dict:
+
+        # with self.post_measures:
+        audio, mel, mel_lens = model_output
 
         audio = self.tts.postprocess(audio, mel_lens)
         # Convert audio tensor into a serialized base64 string
@@ -429,6 +497,9 @@ if __name__ == '__main__':
 
     ttsapi = TTSServer()
     # server = ls.LitServer(ttsapi, max_batch_size=1, batch_timeout=0.01)
-    server = ls.LitServer(ttsapi, accelerator="gpu")
+    server = ls.LitServer(ttsapi,
+                          accelerator="gpu",
+                          callbacks=[InferenceTimeLogger()],
+                          loggers=FileLogger())
 
     server.run(port=7008)

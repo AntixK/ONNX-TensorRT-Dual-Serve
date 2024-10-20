@@ -63,6 +63,7 @@ model_config:
 inference:
   input_file: "phrases/devset10.tsv"
   output_dir: "output"
+  log_dir: "logs"
   use_amp: True
   use_cuda: True
   batch_size: 32
@@ -77,7 +78,7 @@ inference:
   sampling_rate: 22050
   window_length: 1024
   hop_length: 256
-  fade_out: 10
+  fade_out: 0
   affinity: "single"
   l2_promote: True
   hifigan: "pretrained_models/hifigan/hifigan_gen_checkpoint_10000_ft.pt"
