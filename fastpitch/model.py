@@ -33,7 +33,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from common import filter_warnings
 from common.layers import ConvReLUNorm
 from common.utils import mask_from_lens
 from fastpitch.alignment import b_mas, mas_width1

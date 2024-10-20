@@ -222,7 +222,7 @@ class Generator(nn.Module):
         return x
 
     def remove_weight_norm(self):
-        print('HiFi-GAN: Removing weight norm.')
+        # print('HiFi-GAN: Removing weight norm.')
         for l in self.ups:
             remove_weight_norm(l)
         for group in self.resblocks:

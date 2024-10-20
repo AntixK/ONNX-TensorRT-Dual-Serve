@@ -240,6 +240,9 @@ class Text2Speech:
         return res_audios
     
     def save_audio(self, audios: List[torch.Tensor]):
+
+        Path(self.args.output_dir).mkdir(parents=False, exist_ok=True)
+        
         for i, audio in enumerate(audios):
             fname = f'audio_{i}.wav'
             audio_path = Path(self.args.output_dir, fname)
@@ -309,143 +312,143 @@ class Text2Speech:
         return f'{self.__class__.__name__}\n(Text -> {self.generator_name} -> {self.vocoder_name} -> Audio)'
 
 
-def main():
-    torch.cuda.empty_cache()
+# def main():
+#     torch.cuda.empty_cache()
 
-    config = get_args()
+#     config = get_args()
 
-    args = config.inference
-    model_args = config.model_config
+#     args = config.inference
+#     model_args = config.model_config
 
 
-    assert args.hifigan is not None or args.fastpitch is not None, \
-        'Both FastPitch or HiFi-GAN models must be provided.'
+#     assert args.hifigan is not None or args.fastpitch is not None, \
+#         'Both FastPitch or HiFi-GAN models must be provided.'
 
-    if args.affinity != 'disabled':
-        nproc_per_node = torch.cuda.device_count()
-        affinity = gpu_affinity.set_affinity(
-            0,
-            nproc_per_node,
-            args.affinity
-        )
-        # print(f'Thread affinity: {affinity}')
+#     if args.affinity != 'disabled':
+#         nproc_per_node = torch.cuda.device_count()
+#         affinity = gpu_affinity.set_affinity(
+#             0,
+#             nproc_per_node,
+#             args.affinity
+#         )
+#         # print(f'Thread affinity: {affinity}')
 
-    if args.l2_promote:
-        l2_promote()
+#     if args.l2_promote:
+#         l2_promote()
 
-    torch.backends.cudnn.benchmark = args.use_cudnn_benchmark
+#     torch.backends.cudnn.benchmark = args.use_cudnn_benchmark
 
-    if args.output_dir is not None:
-        Path(args.output_dir).mkdir(parents=False, exist_ok=True)
+#     if args.output_dir is not None:
+#         Path(args.output_dir).mkdir(parents=False, exist_ok=True)
 
-    log_fpath = str(Path(args.output_dir, 'nvlog_infer.json'))
+#     log_fpath = str(Path(args.output_dir, 'nvlog_infer.json'))
 
-    device = torch.device('cuda' if args.use_cuda else 'cpu')
+#     device = torch.device('cuda' if args.use_cuda else 'cpu')
 
-    generator = None
-    vocoder = None
+#     generator = None
+#     vocoder = None
 
-    is_ts_based_infer = True
+#     is_ts_based_infer = True
 
-    # Get MelSpectrogram Generator (FastPitch)
-    gen_name = 'fastpitch'
-    generator = get_model(model_name='FastPitch',
-                            model_args= model_args,
-                            args=args,
-                            device=device,
-                            jittable=is_ts_based_infer)
+#     # Get MelSpectrogram Generator (FastPitch)
+#     gen_name = 'fastpitch'
+#     generator = get_model(model_name='FastPitch',
+#                             model_args= model_args,
+#                             args=args,
+#                             device=device,
+#                             jittable=is_ts_based_infer)
 
-    # Get Vocoder (HiFi-GAN)
-    voc_name = 'hifigan'
-    vocoder = get_model(model_name='HiFi-GAN',
-                        model_args= model_args,
-                        args=args,
-                        device=device,
-                        jittable=is_ts_based_infer)
+#     # Get Vocoder (HiFi-GAN)
+#     voc_name = 'hifigan'
+#     vocoder = get_model(model_name='HiFi-GAN',
+#                         model_args= model_args,
+#                         args=args,
+#                         device=device,
+#                         jittable=is_ts_based_infer)
     
-    # vocoder = _convert_ts_to_trt_hifigan(vocoder, 
-    #                                      args.use_amp, 
-    #                                      trt_min_opt_max_batch=(1, 8, 16),
-    #                                      trt_min_opt_max_hifigan_length=(1, 80, 8192))
+#     # vocoder = _convert_ts_to_trt_hifigan(vocoder, 
+#     #                                      args.use_amp, 
+#     #                                      trt_min_opt_max_batch=(1, 8, 16),
+#     #                                      trt_min_opt_max_hifigan_length=(1, 80, 8192))
 
-    def generate_audio(mel):
-        audios = vocoder(mel).float()
-        return audios.squeeze(1) * args.max_wav_value
+#     def generate_audio(mel):
+#         audios = vocoder(mel).float()
+#         return audios.squeeze(1) * args.max_wav_value
 
-    if args.p_arpabet > 0.0:
-        cmudict.initialize(args.cmudict_path, args.heteronyms_path)
+#     if args.p_arpabet > 0.0:
+#         cmudict.initialize(args.cmudict_path, args.heteronyms_path)
 
-    gen_kw = {'pace': args.pace,
-              'speaker': args.speaker_id,
-              'pitch_tgt': None,
-              }
+#     gen_kw = {'pace': args.pace,
+#               'speaker': args.speaker_id,
+#               'pitch_tgt': None,
+#               }
 
 
-    # Prepare data
-    fields = load_fields(args.input_file)
-    batches = prepare_input_sequence(
-        fields, device, args.symbol_set, args.text_cleaners, args.batch_size,
-        p_arpabet=args.p_arpabet)
+#     # Prepare data
+#     fields = load_fields(args.input_file)
+#     batches = prepare_input_sequence(
+#         fields, device, args.symbol_set, args.text_cleaners, args.batch_size,
+#         p_arpabet=args.p_arpabet)
 
-    # Do warmup
-    cycle = itertools.cycle(batches)
-    # Use real data rather than synthetic - FastPitch predicts len
-    for _ in tqdm(range(args.warmup_steps), 'Warmup'):
-        with torch.no_grad():
-            b = next(cycle)
-            mel, *_ = generator(b['text'])
-            audios = generate_audio(mel)
+#     # Do warmup
+#     cycle = itertools.cycle(batches)
+#     # Use real data rather than synthetic - FastPitch predicts len
+#     for _ in tqdm(range(args.warmup_steps), 'Warmup'):
+#         with torch.no_grad():
+#             b = next(cycle)
+#             mel, *_ = generator(b['text'])
+#             audios = generate_audio(mel)
 
-    gen_measures = MeasureTime(cuda=args.use_cuda)
-    vocoder_measures = MeasureTime(cuda=args.use_cuda)
+#     gen_measures = MeasureTime(cuda=args.use_cuda)
+#     vocoder_measures = MeasureTime(cuda=args.use_cuda)
 
-    all_utterances = 0
-    all_samples = 0
-    all_batches = 0
-    all_letters = 0
-    all_frames = 0
+#     all_utterances = 0
+#     all_samples = 0
+#     all_batches = 0
+#     all_letters = 0
+#     all_frames = 0
 
-    reps = args.num_repeats
+#     reps = args.num_repeats
    
-    print(f'Inference: {reps} repetitions')
-    for rep in (tqdm(range(reps), 'Inference') if reps > 1 else range(reps)):
-        for b in batches:
+#     print(f'Inference: {reps} repetitions')
+#     for rep in (tqdm(range(reps), 'Inference') if reps > 1 else range(reps)):
+#         for b in batches:
 
-            # Generate mel spectrograms from FastPitch
-            with torch.no_grad(), gen_measures:
-                mel, mel_lens, *_ = generator(b['text'], **gen_kw)
+#             # Generate mel spectrograms from FastPitch
+#             with torch.no_grad(), gen_measures:
+#                 mel, mel_lens, *_ = generator(b['text'], **gen_kw)
 
-            gen_infer_perf = mel.size(0) * mel.size(2) / gen_measures[-1]
-            all_letters += b['text_lens'].sum().item()
-            all_frames += mel.size(0) * mel.size(2)
+#             gen_infer_perf = mel.size(0) * mel.size(2) / gen_measures[-1]
+#             all_letters += b['text_lens'].sum().item()
+#             all_frames += mel.size(0) * mel.size(2)
           
 
-            # Generate audio from mel spectrograms using Hifigan vocoder
-            with torch.no_grad(), vocoder_measures:
-                audios = generate_audio(mel)
+#             # Generate audio from mel spectrograms using Hifigan vocoder
+#             with torch.no_grad(), vocoder_measures:
+#                 audios = generate_audio(mel)
 
-            vocoder_infer_perf = (
-                audios.size(0) * audios.size(1) / vocoder_measures[-1])
-
-
-            if args.output_dir is not None and rep == reps-1:
-                for i, audio in enumerate(audios):
-                    audio = audio[:mel_lens[i].item() * args.hop_length]
-
-                    if args.fade_out:
-                        fade_len = args.fade_out * args.hop_length
-                        fade_w = torch.linspace(1.0, 0.0, fade_len)
-                        audio[-fade_len:] *= fade_w.to(audio.device)
-
-                    audio = audio / torch.max(torch.abs(audio))
-                    fname = b['output'][i] if 'output' in b else f'audio_{all_utterances + i}.wav'
-                    audio_path = Path(args.output_dir, fname)
-                    write(audio_path, args.sampling_rate, audio.cpu().numpy())
+#             vocoder_infer_perf = (
+#                 audios.size(0) * audios.size(1) / vocoder_measures[-1])
 
 
-            all_utterances += mel.size(0)
-            all_samples += mel_lens.sum().item() * args.hop_length
-            all_batches += 1
+#             if args.output_dir is not None and rep == reps-1:
+#                 for i, audio in enumerate(audios):
+#                     audio = audio[:mel_lens[i].item() * args.hop_length]
+
+#                     if args.fade_out:
+#                         fade_len = args.fade_out * args.hop_length
+#                         fade_w = torch.linspace(1.0, 0.0, fade_len)
+#                         audio[-fade_len:] *= fade_w.to(audio.device)
+
+#                     audio = audio / torch.max(torch.abs(audio))
+#                     fname = b['output'][i] if 'output' in b else f'audio_{all_utterances + i}.wav'
+#                     audio_path = Path(args.output_dir, fname)
+#                     write(audio_path, args.sampling_rate, audio.cpu().numpy())
+
+
+#             all_utterances += mel.size(0)
+#             all_samples += mel_lens.sum().item() * args.hop_length
+#             all_batches += 1
 
 
 if __name__ == '__main__':
