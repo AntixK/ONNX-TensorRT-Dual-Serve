@@ -8,6 +8,7 @@ from pathlib import Path
 from tqdm.auto import tqdm
 from box import Box
 import base64
+import pickle
 import torch
 import numpy as np
 from scipy.io.wavfile import write
@@ -25,14 +26,11 @@ from common.utils import l2_promote
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-
 from typing import List, Tuple, Callable, Union
 
 import onnx
 import onnxruntime as ort
 import torch_tensorrt as trt
-
-
 
 import litserve as ls
 
@@ -94,12 +92,6 @@ def get_model(model_name:str,
     sd = {re.sub('^module\.', '', k): v for k, v in sd.items()}
     status = model.load_state_dict(sd, strict=False)
 
-    # if model_args.target == "onnx":
-    #     # Convert to ONNX
-    #     mel_input = torch.randn(1, 80, 661).to(device)
-    #     onnx_model = torch.onnx.dynamo_export(model.to(device), mel_input)
-    #     onnx_model.save('pretrained_models/hifigan.onnx')
-
     if model_name == 'HiFi-GAN':
         model.remove_weight_norm()
 
@@ -133,36 +125,6 @@ def load_fields(fpath) -> dict:
         columns = ['text']
         fields = [lines]
     return {c: f for c, f in zip(columns, fields)}
-
-
-def _convert_ts_to_trt_hifigan(ts_model: Callable,
-                               use_amp: bool,
-                               trt_min_opt_max_batch: Tuple,
-                               trt_min_opt_max_hifigan_length: Tuple,
-                               num_mels:int=80):
-
-    trt_min_opt_max_batch = (1, 8, 16)
-    trt_min_opt_max_hifigan_length = (100, 800, 1200)
-
-    trt_dtype = torch.half if use_amp else torch.float
-    print(f'Torch TensorRT: compiling HiFi-GAN for dtype {trt_dtype}.')
-    min_shp, opt_shp, max_shp = zip(trt_min_opt_max_batch,
-                                    (num_mels,) * 3,
-                                    trt_min_opt_max_hifigan_length)
-    compile_settings = {
-        "inputs": [torch_tensorrt.Input(
-            min_shape=min_shp,
-            opt_shape=opt_shp,
-            max_shape=max_shp,
-            dtype=trt_dtype,
-        )],
-        "enabled_precisions": {trt_dtype},
-        "require_full_compilation": True,
-    }
-    trt_model = torch_tensorrt.compile(ts_model, **compile_settings)
-    print('Torch TensorRT: compilation successful.')
-    return trt_model
-
 
 def prepare_input_sequence(fields: dict,
                            device: torch.device,
@@ -227,11 +189,14 @@ class Text2Speech:
         self.model_args: Box = config.model_config
 
         self.device = torch.device('cuda' if config.inference.use_cuda else 'cpu')
+
+        logger.info(f'Using device: {self.device}')
         self.generator = None
         self.vocoder = None
         self.is_ts_based_infer = True
 
         if self.args.l2_promote:
+            logger.info('L2 promotion is enabled')
             l2_promote()
 
         cmudict.initialize(self.args.cmudict_path, self.args.heteronyms_path)
@@ -243,9 +208,8 @@ class Text2Speech:
                                    device=self.device,
                                    jittable=self.is_ts_based_infer)
 
-
+        logger.info(f'Loaded FastPitch model from {self.args.fastpitch}')
         ts_gen_model = torch.jit.script(generator)
-
         torch._dynamo.reset()
         backend_kwargs = {
             "enabled_precisions": {torch.half if self.args.use_amp else torch.float},
@@ -257,61 +221,77 @@ class Text2Speech:
         }
 
         sample_inputs = torch.randint(3, 5, (1, 122)).to(self.device)
-
         trt_fastpitch = torch.compile(ts_gen_model,
             backend = "torch_tensorrt",
             options=backend_kwargs,
             dynamic=False)
-
         trt_fastpitch(sample_inputs)
-
         self.generator = trt_fastpitch
 
-        print('FastPitch: Converted to TRT')
-
+        logger.info("Converted FastPitch to Torch-TensorRT Model")
 
         self.gen_kw = {'pace': self.args.pace,
                        'speaker': self.args.speaker_id,
                        'pitch_tgt': None,}
 
         # Initialize Vocoder (HiFi-GAN)
-        self.vocoder = get_model(model_name='HiFi-GAN',
+        vocoder = get_model(model_name='HiFi-GAN',
                                  model_args=self.model_args,
                                  args=self.args,
                                  device=self.device,
                                  jittable=self.is_ts_based_infer)
 
+        self.vocoder = vocoder
 
-        # Convert to Torch-TensorRT
-        # print('HiFi-GAN: Converted to Torch script')
-        # ts_model = torch.jit.script(self.vocoder)
+        logger.info(f'Loaded HiFi-GAN model from {self.args.hifigan}')
 
+        # Convert to ONNX
+        mel_input = torch.randn(1, 80, 661).to(self.device)
+        if self.args.use_amp:
+            mel_input = mel_input.half()
 
-        # # Convert to ONNX
-        # print('HiFi-GAN: Converted to ONNX')
-        # mel_input = torch.randn(1, 80, 661).to(self.device)
-        # voc_onnx_model = torch.onnx.dynamo_export(self.vocoder, mel_input)
-        # voc_onnx_model.save('pretrained_models/hifigan.onnx')
+        # Cannot use torch.dynamo to export to ONNX
+        # as it does not support custom input and output naming
+        # and it is a PITA to bind torch tensorts to ONNX
+        # See this Github Issue:
+        #  https://github.com/pytorch/pytorch/issues/107355
+        # voc_onnx_model = torch.onnx.dynamo_export(vocoder, mel_input)
 
-        # Load ONNX
+        voc_onnx_model = torch.onnx.export(
+                            vocoder,
+                            mel_input,
+                            'pretrained_models/hifigan.onnx',
+                            export_params=True,
+                            do_constant_folding=True,
+                            input_names = ['mel'],
+                            output_names = ['audio'],
+                            dynamic_axes={'input' : {0 : 'batch_size'},
+                                          'output' : {0 : 'batch_size'}})
 
-        # self.vocoder = onnx.load("pretrained_models/hifigan.onnx")
-        # onnx.checker.check_model(self.vocoder)
+        # Sanity check
+        onnx_model = onnx.load('pretrained_models/hifigan.onnx')
+        onnx.checker.check_model(onnx_model)
+        del onnx_model
+
+        options = ort.SessionOptions()
+        options.enable_profiling=False
+
+        self.ort_session = ort.InferenceSession("pretrained_models/hifigan.onnx",
+            sess_options=options,
+            providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider'])
+
+        logger.info("Converted HiFi-GAN to ONNX Model")
 
         # Initialize Text Processor
         self.tp = get_text_processing(self.args.symbol_set,
                                          self.args.text_cleaners,
                                          self.args.p_arpabet)
 
-        # Initilize measurement trackers
-        self.gen_measures = MeasureTime(cuda=self.args.use_cuda)
-        self.voc_measures = MeasureTime(cuda=self.args.use_cuda)
+        logger.info(f'Loaded Text Processor with symbol set: {self.args.symbol_set}')
 
-        # logger.remove(0)
-        # log_format = "<green>{time:YYYY-MM-DD HH:mm:ss.SSS zz}</green> | <level>{level: <8}</level> | <b>{message}</b>"
-        # # logger.add(sys.stdout, level="INFO", format=log_format, colorize=True, backtrace=True, diagnose=True)
-
-        # logger.add(f"{self.args.log_dir}/time.log", level="INFO", format=log_format, colorize=False, backtrace=True, diagnose=True)
+        # # Initilize measurement trackers
+        # self.gen_measures = MeasureTime(cuda=self.args.use_cuda)
+        # self.voc_measures = MeasureTime(cuda=self.args.use_cuda)
 
     def preprocess_text(self, text: str) -> torch.Tensor:
         """
@@ -401,18 +381,6 @@ class Text2Speech:
         audios = self.vocoder(mel).float()
         return audios.squeeze(1) * self.args.max_wav_value
 
-    # def _convert_to_torchscript(self):
-    #     return torch.jit.script(self.generator)
-
-    # def _convert_to_onnx(self):
-    #     return torch.onnx.dynamo_export(self.generator, torch_input)
-
-    # def _convert_to_trt(self):
-    #     _convert_ts_to_trt_hifigan(self.vocoder,
-    #                                self.args.use_amp,
-    #                                trt_min_opt_max_batch=(1, 8, 16),
-    #                                trt_min_opt_max_hifigan_length=(1, 80, 8192))
-
     @property
     def generator_name(self)->str:
         return 'FastPitch'
@@ -435,19 +403,41 @@ class Text2Speech:
     # @torch.inference_mode()
     @torch.no_grad()
     def run(self, encoded_text: torch.Tensor) -> Tuple:
-        print(encoded_text.size(), encoded_text.dtype)
         encoded_text = encoded_text.to(self.device)
 
-        # with self.gen_measures:
         mel, mel_lens, *_ = self.generator(encoded_text, **self.gen_kw)
 
-        # with self.voc_measures:
-        # print(mel.size())
-        audios = self.vocoder(mel).float()
-        audios = audios.squeeze(1) * self.args.max_wav_value
+        # mel = mel.contiguous()
 
-        # logger.info(f"Generator-Inference-Time:{self.gen_measures[-1]:4.4f}s | Vocoder-Inference-Time:{self.voc_measures[-1]:4.4f}s")
-        return (audios, mel, mel_lens)
+        # # Reference:
+        # #  https://github.com/microsoft/onnxruntime-inference-examples/blob/main/python/api/onnxruntime-python-api.py
+        io_binding = self.ort_session.io_binding()
+
+        io_binding.bind_input(
+            name='mel',
+            device_type='cuda',
+            device_id=0,
+            element_type=np.float32,
+            shape=tuple(mel.shape),
+            buffer_ptr=mel.data_ptr(),)
+
+        out_shape = (1, 1, 169216)
+        audio_tensor = torch.empty(out_shape,
+                                   dtype=torch.float32,
+                                   device=self.device).contiguous()
+        io_binding.bind_output(
+            name='audio',
+            device_type='cuda',
+            device_id=0,
+            element_type=np.float32,
+            shape=tuple(audio_tensor.shape),
+            buffer_ptr=audio_tensor.data_ptr(),
+        )
+
+        # audio_tensor = self.vocoder(mel)
+
+        audio_tensor = audio_tensor.float().squeeze(1) * self.args.max_wav_value
+        return (audio_tensor, mel, mel_lens)
 
     # @torch.inference_mode()
     @torch.no_grad()
@@ -466,9 +456,14 @@ class Text2Speech:
 
 class FileLogger(ls.Logger):
     def process(self, key, value):
-        time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # decode value dict
+        metrics:dict = pickle.loads(base64.b64decode(value))
+        metrics_str = ','.join([f"{k}:{v:.4f}" for k, v in metrics.items()])
+        time_now = datetime.now().strftime("%Y%m%d-%H%M%S")
         with open("logs/tts_server.log", "a+") as f:
-            f.write(f"{time_now}|{key}:{value:.4f}\n")
+            # f.write(f"{time_now}|{key}:{value:.4f}\n")
+            f.write(f"{time_now},{metrics_str}\n")
+
 
 class InferenceTimeLogger(ls.Callback):
     def on_before_predict(self, lit_api):
@@ -484,15 +479,20 @@ class InferenceTimeLogger(ls.Callback):
         torch.cuda.synchronize()
         t1 = time.perf_counter()
         elapsed = t1 - self._start_time
-        lit_api.log("Inference_time", elapsed)
 
-        lit_api.log("Samples", lit_api.num_samples)
-        lit_api.log("Utterances", lit_api.num_utterances)
+        metrics = {
+            "Inference_time": elapsed,
+            "Samples": lit_api.num_samples,
+            "Utterances": lit_api.num_utterances
+        }
 
+        # Encode the metrics dict (workaround for LitServe API)
+        metrics = pickle.dumps(metrics)
+        encoded_metrics = base64.b64encode(metrics).decode('utf-8')
+
+        lit_api.log("metrics", encoded_metrics)
         torch.cuda.memory._dump_snapshot(f"{lit_api.log_dir}/gpu_mem_snapshot.pickle")
         torch.cuda.memory._record_memory_history(enabled=None)
-
-    # def (self):
 
 
 class TTSServer(ls.LitAPI):
@@ -536,7 +536,6 @@ class TTSServer(ls.LitAPI):
         self.num_samples = mel_lens.sum().item() * self.tts.args.hop_length
         self.num_utterances = mel.size(0)
 
-        # print(encoded_text.size(), mel.size())
         return (audio, mel, mel_lens)
 
     def encode_response(self, model_output: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> dict:
