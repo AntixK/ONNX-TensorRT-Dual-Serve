@@ -6,3 +6,6 @@ inflect
 loguru
 pydantic
 litserve
+onnx
+onnxscript
+onnxruntime
