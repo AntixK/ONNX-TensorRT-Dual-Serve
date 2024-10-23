@@ -1,5 +1,7 @@
 # ONNX-TensorRT-Dual-Serve
 
+## Report
+[Link to Report](https://github.com/AntixK/ONNX-TensorRT-Dual-Serve/blob/main/report.md)
 ## Requirements
 
 - [NVIDIA Docker](https://github.com/NVIDIA/nvidia-docker)
