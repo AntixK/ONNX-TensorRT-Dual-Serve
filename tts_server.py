@@ -158,25 +158,6 @@ def prepare_input_sequence(fields: dict,
     return batches
 
 
-class MeasureTime(list):
-    def __init__(self, *args, cuda=True, **kwargs):
-        super(MeasureTime, self).__init__(*args, **kwargs)
-        self.cuda = cuda
-
-    def __enter__(self):
-        if self.cuda:
-            torch.cuda.synchronize()
-        self.t0 = time.time()
-
-    def __exit__(self, exc_type, exc_value, exc_traceback):
-        if self.cuda:
-            torch.cuda.synchronize()
-        self.append(time.time() - self.t0)
-
-    def __add__(self, other):
-        assert len(self) == len(other)
-        return MeasureTime((sum(ab) for ab in zip(self, other)), cuda=self.cuda)
-
 def split_into_sentences(paragraph: str) -> List[str]:
     # Regular expression pattern
     sentence_endings = r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!)\s'
@@ -200,6 +181,9 @@ class Text2Speech:
             l2_promote()
 
         cmudict.initialize(self.args.cmudict_path, self.args.heteronyms_path)
+
+        if self.args.use_amp:
+            logger.info('AMP is enabled')
 
         # Initialie MelSpectrogram Generator (FastPitch)
         generator = get_model(model_name='FastPitch',
@@ -245,28 +229,33 @@ class Text2Speech:
 
         logger.info(f'Loaded HiFi-GAN model from {self.args.hifigan}')
 
-        # Convert to ONNX
-        mel_input = torch.randn(1, 80, 661).to(self.device)
-        if self.args.use_amp:
-            mel_input = mel_input.half()
+        if not Path('pretrained_models/hifigan.onnx').exists():
 
-        # Cannot use torch.dynamo to export to ONNX
-        # as it does not support custom input and output naming
-        # and it is a PITA to bind torch tensorts to ONNX
-        # See this Github Issue:
-        #  https://github.com/pytorch/pytorch/issues/107355
-        # voc_onnx_model = torch.onnx.dynamo_export(vocoder, mel_input)
+            # Convert to ONNX
+            mel_input = torch.randn(1, 80, 661).to(self.device)
+            if self.args.use_amp:
+                mel_input = mel_input.half()
 
-        voc_onnx_model = torch.onnx.export(
-                            vocoder,
-                            mel_input,
-                            'pretrained_models/hifigan.onnx',
-                            export_params=True,
-                            do_constant_folding=True,
-                            input_names = ['mel'],
-                            output_names = ['audio'],
-                            dynamic_axes={'input' : {0 : 'batch_size'},
-                                          'output' : {0 : 'batch_size'}})
+            # Cannot use torch.dynamo to export to ONNX
+            # as it does not support custom input and output naming
+            # and it is a PITA to bind torch tensorts to ONNX
+            # See this Github Issue:
+            #  https://github.com/pytorch/pytorch/issues/107355
+            # voc_onnx_model = torch.onnx.dynamo_export(vocoder, mel_input)
+
+            voc_onnx_model = torch.onnx.export(
+                                vocoder,
+                                mel_input,
+                                'pretrained_models/hifigan.onnx',
+                                export_params=True,
+                                do_constant_folding=True,
+                                input_names = ['mel'],
+                                output_names = ['audio'],
+                                dynamic_axes={'input' : {0 : 'batch_size'},
+                                            'output' : {0 : 'batch_size'}})
+
+        else:
+            logger.info('ONNX model already exists, skipping conversion')
 
         # Sanity check
         onnx_model = onnx.load('pretrained_models/hifigan.onnx')
@@ -289,11 +278,7 @@ class Text2Speech:
 
         logger.info(f'Loaded Text Processor with symbol set: {self.args.symbol_set}')
 
-        # # Initilize measurement trackers
-        # self.gen_measures = MeasureTime(cuda=self.args.use_cuda)
-        # self.voc_measures = MeasureTime(cuda=self.args.use_cuda)
-
-    def preprocess_text(self, text: str) -> torch.Tensor:
+    def preprocess_text(self, text: Union[str, List]) -> torch.Tensor:
         """
         Preprocess the input text by encoding it into tensor.
 
@@ -303,7 +288,11 @@ class Text2Speech:
         Returns:
             Tuple: Tuple of encoded text tensor and text lengths tensor.
         """
-        encoded_text = [torch.LongTensor(self.tp.encode_text(text))]
+
+        if isinstance(text, str):
+            text = [text]
+
+        encoded_text = [torch.LongTensor(self.tp.encode_text(t)) for t in text]
         encoded_text = pad_sequence(encoded_text, batch_first=True)
         return encoded_text
 
@@ -406,8 +395,7 @@ class Text2Speech:
         encoded_text = encoded_text.to(self.device)
 
         mel, mel_lens, *_ = self.generator(encoded_text, **self.gen_kw)
-
-        # mel = mel.contiguous()
+        mel = mel.contiguous()
 
         # # Reference:
         # #  https://github.com/microsoft/onnxruntime-inference-examples/blob/main/python/api/onnxruntime-python-api.py
@@ -460,10 +448,10 @@ class FileLogger(ls.Logger):
         metrics:dict = pickle.loads(base64.b64decode(value))
         metrics_str = ','.join([f"{k}:{v:.4f}" for k, v in metrics.items()])
         time_now = datetime.now().strftime("%Y%m%d-%H%M%S")
+
         with open("logs/tts_server.log", "a+") as f:
             # f.write(f"{time_now}|{key}:{value:.4f}\n")
             f.write(f"{time_now},{metrics_str}\n")
-
 
 class InferenceTimeLogger(ls.Callback):
     def on_before_predict(self, lit_api):
@@ -494,7 +482,6 @@ class InferenceTimeLogger(ls.Callback):
         torch.cuda.memory._dump_snapshot(f"{lit_api.log_dir}/gpu_mem_snapshot.pickle")
         torch.cuda.memory._record_memory_history(enabled=None)
 
-
 class TTSServer(ls.LitAPI):
     def setup(self, device):
         config = get_args(Path("config.yaml"))
@@ -509,43 +496,37 @@ class TTSServer(ls.LitAPI):
         self.num_samples = 0
         self.num_utterances = 0
 
-        # self.pre_measures = MeasureTime(cuda=config.inference.use_cuda)
-        # self.post_measures = MeasureTime(cuda=config.inference.use_cuda)
-
-    def decode_request(self, request: dict) -> torch.Tensor:
+    def decode_request(self, request: dict) -> str:
         """
         Decode the JSON request from the client into
         text to be used by the Text2Speech model.
         """
-        # with self.pre_measures:
         text = request['text']
-        encoded_text = self.tts.preprocess_text(text)
-
-        return encoded_text
+        return text
 
     # def batch(self, decoded_requests: torch.Tensor) -> List[str]:
-    #     return decoded_requests
+    #     # print(decoded_requests)
+    #     return decoded_requests[0]
 
     # def unbatch(self, responses):
     #     pass
 
-    def predict(self, encoded_text: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def predict(self, text):
+        encoded_text = self.tts.preprocess_text(text)
+
         audio, mel, mel_lens = self.tts.run(encoded_text)
 
         # Update throughput tracker
         self.num_samples = mel_lens.sum().item() * self.tts.args.hop_length
         self.num_utterances = mel.size(0)
 
-        return (audio, mel, mel_lens)
-
-    def encode_response(self, model_output: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> dict:
-
-        # with self.post_measures:
-        audio, mel, mel_lens = model_output
-
         audio = self.tts.postprocess(audio, mel_lens)
+        return audio.cpu().numpy()
+
+    def encode_response(self, audio) -> dict:
+
         # Convert audio tensor into a serialized base64 string
-        audio = base64.b64encode(audio.cpu().numpy()).decode("utf-8")
+        audio = base64.b64encode(audio).decode("utf-8")
 
         return {"content": audio,
                 "content_type": "audio/wav",
@@ -564,12 +545,21 @@ if __name__ == '__main__':
     # print(tts)
 
     # tts.do_warmup()
-    # tts("Yo! waddup mayne? How you doing?")
+    # # tts("Yo! waddup mayne? How you doing?")
+    # #
+    # benchmark_data = np.genfromtxt("phrases/benchmark_8_128.tsv",
+    #                                delimiter="\t",
+    #                                dtype=str,
+    #                                skip_header=1)[:, -1]
+
+    # for i, text in enumerate(benchmark_data):
+    #     tts(text)
 
 
     ttsapi = TTSServer()
-    # server = ls.LitServer(ttsapi, max_batch_size=1, batch_timeout=0.01)
     server = ls.LitServer(ttsapi,
+                          max_batch_size=1,
+                          batch_timeout=1.0,
                           accelerator="gpu",
                           callbacks=[InferenceTimeLogger()],
                           loggers=FileLogger())

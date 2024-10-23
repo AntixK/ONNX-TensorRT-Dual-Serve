@@ -6,7 +6,4 @@ inflect
 loguru
 pydantic
 litserve
-onnx
-onnxscript
-onnxruntime
-onnxruntime-gpu
+onnxruntime-gpu==1.19.2

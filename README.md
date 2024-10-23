@@ -15,11 +15,17 @@ wget --content-disposition https://api.ngc.nvidia.com/v2/models/nvidia/dle/hifig
 
 
 ```
+nsys stats --force-export=true --report cuda_gpu_sum --report cuda_gpu_mem_time_sum --report cuda_gpu_mem_size_sum --report cuda_api_sum --format csv,column --output .,- report2.nsys-rep
+```
+
+```
 import soundfile as sf
 parsed = spec_generator.parse("You can type your sentence here to get nemo to produce speech.")
 spectrogram = spec_generator.generate_spectrogram(tokens=parsed)
 audio = model.convert_spectrogram_to_audio(spec=spectrogram)
 ```
+
+
 
 E2E system:
 
