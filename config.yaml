@@ -67,7 +67,7 @@ inference:
   use_amp: True
   use_cuda: True
   batch_size: 32
-  warmup_steps: 10
+  warmup_steps: 20
   num_repeats: 10
   use_cudnn_benchmark: True
   denoising_strength: 0.00
