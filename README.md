@@ -1,43 +1,52 @@
 # ONNX-TensorRT-Dual-Serve
 
-## Download Models (Trained on LJSpeech Dataset)
+## Requirements
+
+- [NVIDIA Docker](https://github.com/NVIDIA/nvidia-docker)
+- [PyTorch 24.08-py3 NGC container](https://ngc.nvidia.com/registry/nvidia-pytorch)
+- Atleast 1 NVIDIA GPU with one of the following architectures:
+  - [NVIDIA Volta architecture](https://www.nvidia.com/en-us/data-center/volta-gpu-architecture/)
+  - [NVIDIA Turing architecture](https://www.nvidia.com/en-us/geforce/turing/)
+  - [NVIDIA Ampere architecture](https://www.nvidia.com/en-us/data-center/nvidia-ampere-gpu-architecture/)
+
+
+## Usage
+### Download Assets
+
+This includes the following
+1. FastPitch (Trained on LJSpeech dataset)
+2. HiFiGAN (trained on LJSpeech dataset)
+3. cmudict 
+
 ```
-wget --content-disposition https://api.ngc.nvidia.com/v2/models/nvidia/fastpitch_pyt_fp32_ckpt_v1_1/versions/21.05.0/zip -O models/nvidia_fastpitch_210824.pt
-
-wget --content-disposition https://api.ngc.nvidia.com/v2/models/nvidia/dle/hifigan__pyt_ckpt_mode-finetune_ds-ljs22khz/versions/21.08.0_amp/zip -O models/hifigan_gen_checkpoint_10000_ft.pt
+bash downoad_assets.sh
 ```
 
-- **FastPitch** is NVIDIA's fully-parallel (non-autoregressive) transformer architecture.
+### Launch Server and Client
 
-## Convert Models to ONNX and TensorRT
+- Build the docker image
 
-## Create a Triton Server
+```
+make build-dev-env
+```
 
+- Launch the container
+```
+make run-dev-env
+```
+- Inside the container, open a terminal and launch the server
+```
+python tts_server.py
+```
+- In another terminal within the container, launch the client
+```
+python client.py
+```
+
+
+### Profile using NVIDIA's Nsys
 
 ```
 nsys stats --force-export=true --report cuda_gpu_sum --report cuda_gpu_mem_time_sum --report cuda_gpu_mem_size_sum --report cuda_api_sum --format csv,column --output .,- report2.nsys-rep
 ```
 
-```
-import soundfile as sf
-parsed = spec_generator.parse("You can type your sentence here to get nemo to produce speech.")
-spectrogram = spec_generator.generate_spectrogram(tokens=parsed)
-audio = model.convert_spectrogram_to_audio(spec=spectrogram)
-```
-
-
-
-E2E system:
-
-test input -> generate spectrogram (FastPitch) -> Generate audio (HiFiGAN)
-
-
-references:
-1. https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/tts_en_e2e_fastpitchhifigan
-2. https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/tts_hifigan
-3. https://docs.nvidia.com/deeplearning/triton-inference-server/archives/triton_inference_server_1150/user-guide/docs/install.html#:~:text=The%20Triton%20Inference%20Server%20is,Docker%20and%20nvidia%2Ddocker%20installed.
-4. https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/core/export.html
-5. https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/tts/checkpoints.html
-6. https://github.com/NVIDIA/DeepLearningExamples/tree/master/PyTorch/SpeechSynthesis/FastPitch
-7. https://github.com/NVIDIA/DeepLearningExamples/blob/master/PyTorch/SpeechSynthesis/FastPitch/inference.py
-8. https://www.youtube.com/embed/YHloC_py1QM

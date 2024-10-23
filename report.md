@@ -1,8 +1,27 @@
 
+# Pipelining ONNX and TensorRT Models
 
-# Results
+In this report, we shall discuss and document the process of pipelining two models, one in ONNX and the other in TensorRT. The models in question are FastPitch and HiFi-GAN respectively. The FastPitch model is a text-to-speech model that generates mel spectrograms from text. The HiFi-GAN model is a vocoder that converts the mel spectrograms to audio waveforms. Naturally, they can be pipelined to generate audio from text.
 
-## Latency
+
+## Pipeline Description
+The [FastPitch](https://arxiv.org/abs/2006.06873) model is converted to the TensorRT format. This is done by first converting the PyTorch model to TorchScript. A JIT-able pytorch code for FastPitch model can be obtained from this [GitHub repo](https://github.com/NVIDIA/DeepLearningExamples/tree/master/PyTorch/SpeechSynthesis/FastPitch/fastpitch). With the newer PyTorch versions (> 2.0), converting to TensorRT is quite easy. PyTorch, now comes with a compiler that supports a variety of backends, including `torch_tensorrt`.
+
+
+The [HiFi-GAN](https://arxiv.org/abs/2010.05646) model is converted to the ONNX format. Although, the newer versions of PyTorch provides a new JIT compiler - Dynamo, that can be used to export to ONNX, it is tricky to do so. The reason being that it does not support exporting models with named input and output tensors. This can be pose a problem when pipelining the models, as it is easier to bind the tensors based on their names. As such, we have to resort to the legacy api - `torch.onnx.export`.
+
+
+A reason for the above choice is that the FastPitch model, with the current code, cannot be directly converted to ONNX model. In retrospect, I could have used the model from NVIDIA's Nemo library. They do provide the [code](https://github.com/NVIDIA/NeMo/blob/f45f56bb3730939f43ef2a8656bf8075d615f361/nemo/collections/tts/models/fastpitch.py) for the FastPitch model that can be exported to ONNX.
+
+
+The two models, after their respective conversions, can be chained together to for an end-to-end text-to-speech system. The FastPitch TensorRT model can as is - calling the infer function with the encoded input text. The HiFi-GAN ONNX model can be used with the `onnxruntime` - creating an inference session. I have used both TensorRT and CUDA as execution providers for faster inference on the GPU. Since the output of the FastPitch model still remains on the same GPU, the ONNX Inference session can be directly bound to the output tensor by name (Hence, we used the legacy `torch.onnx.export` api). Similarly, the output of the ONNX model can be exported to the host memory by name. 
+
+
+For the servering the above TTS model, we shall use [LitServe](https://github.com/Lightning-AI/LitServe) framework. The client library is a simple python script that sends a text to the server and receives the audio waveform via the `requests` library. These are available in the `client.py` and `tts_server.py` files respectively.
+
+## Results
+
+### Latency
 FastPitch (TensorRT) + HiFi-GAN (ONNX) (without denoising)
 
 | Batch size | Precision | Avg Latency(s) | Latency 90% (s) | Latency 95% (s) | Latency 99% (s) | Throughput (samples/sec) | Avg RTF |
@@ -15,7 +34,7 @@ FastPitch (TensorRT) + HiFi-GAN (ONNX) (without denoising)
 | 8          | TF32      | 0.3250         | 0.3250          | 0.3310          | 0.3310          | 5,253,920                | 64.451  |
 
 
-## CUDA GPU MemOps Summary (by Time) (cuda_gpu_mem_time_sum):
+### CUDA GPU MemOps Summary (by Time) (cuda_gpu_mem_time_sum):
 
  | Time (%) | Total Time (ns) | Count | Avg (ns) | Med (ns) | Min (ns) | Max (ns) | StdDev (ns) | Operation                      |
  | -------- | --------------- | ----- | -------- | -------- | -------- | -------- | ----------- | ------------------------------ |
@@ -24,7 +43,7 @@ FastPitch (TensorRT) + HiFi-GAN (ONNX) (without denoising)
  | 6.3      | 56843830        | 817   | 69576.3  | 1536.0   | 929      | 8871373  | 378621.2    | [CUDA memcpy Device-to-Host]   |
  | 4.5      | 40774609        | 2641  | 15439.1  | 2400.0   | 1119     | 142433   | 33589.2     | [CUDA memcpy Device-to-Device] |
 
-## CUDA GPU MemOps Summary (by Size) (cuda_gpu_mem_size_sum):
+### CUDA GPU MemOps Summary (by Size) (cuda_gpu_mem_size_sum):
 
  | Total (MB) | Count | Avg (MB) | Med (MB) | Min (MB) | Max (MB) | StdDev (MB) | Operation                      |
  | ---------- | ----- | -------- | -------- | -------- | -------- | ----------- | ------------------------------ |
@@ -33,7 +52,7 @@ FastPitch (TensorRT) + HiFi-GAN (ONNX) (without denoising)
  | 470.632    | 994   | 0.473    | 0.001    | 0.000    | 55.724   | 2.188       | [CUDA memcpy Host-to-Device]   |
  | 353.711    | 817   | 0.433    | 0.001    | 0.000    | 55.724   | 2.342       | [CUDA memcpy Device-to-Host]   |
 
-## CUDA API Summary (cuda_api_sum):
+### CUDA API Summary (cuda_api_sum):
 
  | Time (%) | Total Time (ns) | Num Calls | Avg (ns)  | Med (ns)  | Min (ns) | Max (ns)  | StdDev (ns) | Name                           |
  | -------- | --------------- | --------- | --------- | --------- | -------- | --------- | ----------- | ------------------------------ |
@@ -87,3 +106,25 @@ FastPitch (TensorRT) + HiFi-GAN (ONNX) (without denoising)
  | 0.0      | 9443            | 6         | 1573.8    | 1421.0    | 1053     | 2289      | 524.7       | cuInit                         |
  | 0.0      | 1246            | 2         | 623.0     | 623.0     | 201      | 1045      | 596.8       | cudaGetDriverEntryPoint_v11030 |
  | 0.0      | 972             | 4         | 243.0     | 219.0     | 131      | 403       | 114.8       | cuMemGetAllocationGranularity  |
+
+
+The memory snapshot file is also available under `assets/gpu_mem_snapshot.pickle` and can be visualized using the [PyTorch memory vix](https://pytorch.org/memory_viz).
+
+### Issues Faced
+
+The above FastPitch + HiFiGAN pipeline model is also available as an example from NVIDIA, and can be found [here](https://github.com/NVIDIA/DeepLearningExamples/tree/master/PyTorch/SpeechSynthesis/FastPitch). However, I couldn't get the Triton Inference Server to work properly - as the `model.py` is missing a few functions. 
+
+### Future Improvements
+To improve the latency, the following can be done
+1. Improve the data transfer between the models with zero-copy.
+2. Create multiply CUDA streams to process the data in parallel.
+3. Use Triton's dynamic batching based on the load.
+4. FastPitch model uses the traditional MultiHeadAttention. This can be experimented with newer/faster transformer architectures, but requires re-training the model.
+
+## References
+1. https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/tts_en_e2e_fastpitchhifigan
+2. https://docs.nvidia.com/deeplearning/triton-inference-server/archives/triton_inference_server_1150/user-guide/docs/install.html#:~:text=The%20Triton%20Inference%20Server%20is,Docker%20and%20nvidia%2Ddocker%20installed.
+3. https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/core/export.html
+4. https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/tts/checkpoints.html
+5. https://github.com/NVIDIA/DeepLearningExamples/tree/master/PyTorch/SpeechSynthesis/FastPitch
+
