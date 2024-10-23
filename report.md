@@ -21,6 +21,22 @@ For the servering the above TTS model, we shall use [LitServe](https://github.co
 
 ## Results
 
+
+GPU Specs
+```
+Model:           NVIDIA GeForce RTX 3070 Laptop GPU
+IRQ:             191
+GPU UUID:        GPU-d3eb01d5-5c82-d972-bcbb-72c3f67c19f3
+Video BIOS:      94.04.43.00.8d
+Bus Type:        PCIe
+DMA Size:        47 bits
+DMA Mask:        0x7fffffffffff
+Bus Location:    0000:01:00.0
+Device Minor:    0
+GPU Firmware:    560.35.03
+GPU Excluded:    No
+```
+
 ### Latency
 FastPitch (TensorRT) + HiFi-GAN (ONNX) (without denoising)
 
