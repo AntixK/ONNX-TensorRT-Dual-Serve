@@ -213,3 +213,10 @@ class FastPitchJIT(nn.Module):
         # mel_lens = dec_mask.squeeze(2).sum(axis=1).long()
         mel_out = mel_out.permute(0, 2, 1)  # For inference.py
         return mel_out, dec_lens, dur_pred, pitch_pred, energy_pred
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__ = state

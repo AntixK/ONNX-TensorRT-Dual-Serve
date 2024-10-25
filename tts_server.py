@@ -1,4 +1,7 @@
-from json import encoder
+
+import torch
+import torch_tensorrt
+import tensorrt as trt
 import re
 import itertools
 import time
@@ -9,7 +12,8 @@ from tqdm.auto import tqdm
 from box import Box
 import base64
 import pickle
-import torch
+
+
 import numpy as np
 from scipy.io.wavfile import write
 from torch.nn.utils.rnn import pad_sequence
@@ -26,11 +30,10 @@ from common.utils import l2_promote
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-from typing import List, Tuple, Callable, Union
+from typing import List, Tuple, Callable, Union, Dict, Any
 
 import onnx
 import onnxruntime as ort
-import torch_tensorrt as trt
 
 import litserve as ls
 
@@ -164,6 +167,7 @@ def split_into_sentences(paragraph: str) -> List[str]:
     sentences = re.split(sentence_endings, paragraph)
     return sentences
 
+
 class Text2Speech:
     def __init__(self, config: Box):
         self.args: Box = config.inference
@@ -193,10 +197,33 @@ class Text2Speech:
                                    jittable=self.is_ts_based_infer)
 
         logger.info(f'Loaded FastPitch model from {self.args.fastpitch}')
+
+        # Convert FastPitch to ONNX
+        generator = generator
+        text_input = torch.randint(3, 5, (1, 122)).to(self.device)
+
+        print(text_input.shape)
+
+
+        gen_onnx_model = torch.onnx.export(
+                            generator,
+                            text_input,
+                            'pretrained_models/fastpitch.onnx',
+                            export_params=True,
+                            do_constant_folding=True,
+                            input_names = ['text'],
+                            output_names = ['mel'],
+                            dynamic_axes={'text' : {0 : 'batch_size'},
+                                        'mel' : {0 : 'batch_size'}})
+
+        generator = generator.to(self.device)
         ts_gen_model = torch.jit.script(generator)
+        print(torch._dynamo.list_backends())
         torch._dynamo.reset()
         backend_kwargs = {
             "enabled_precisions": {torch.half if self.args.use_amp else torch.float},
+            "cache_built_engines": True,
+            "reuse_cached_engines": True,
             "debug": True,
             "min_block_size": 2,
             "torch_executed_ops": {"torch.ops.aten.sub.Tensor"},
@@ -210,7 +237,11 @@ class Text2Speech:
             options=backend_kwargs,
             dynamic=False)
         trt_fastpitch(sample_inputs)
-        self.generator = trt_fastpitch
+        torch.jit.save(trt_fastpitch, 'pretrained_models/fastpitch_trt.plan')
+
+        self.generator  = torch.jit.load('pretrained_models/fastpitch_trt.plan')
+        # self.generator = trt_fastpitch
+
 
         logger.info("Converted FastPitch to Torch-TensorRT Model")
 
@@ -251,8 +282,8 @@ class Text2Speech:
                                 do_constant_folding=True,
                                 input_names = ['mel'],
                                 output_names = ['audio'],
-                                dynamic_axes={'input' : {0 : 'batch_size'},
-                                            'output' : {0 : 'batch_size'}})
+                                dynamic_axes={'mel' : {0 : 'batch_size'},
+                                            'audio' : {0 : 'batch_size'}})
 
         else:
             logger.info('ONNX model already exists, skipping conversion')
@@ -539,29 +570,29 @@ if __name__ == '__main__':
 
     torch.cuda.empty_cache()
 
-    # config = get_args(Path("config.yaml"))
+    config = get_args(Path("config.yaml"))
 
-    # tts = Text2Speech(config)
-    # print(tts)
+    tts = Text2Speech(config)
+    print(tts)
 
-    # tts.do_warmup()
-    # # tts("Yo! waddup mayne? How you doing?")
-    # #
-    # benchmark_data = np.genfromtxt("phrases/benchmark_8_128.tsv",
-    #                                delimiter="\t",
-    #                                dtype=str,
-    #                                skip_header=1)[:, -1]
+    tts.do_warmup()
+    # tts("Yo! waddup mayne? How you doing?")
+    #
+    benchmark_data = np.genfromtxt("phrases/benchmark_8_128.tsv",
+                                   delimiter="\t",
+                                   dtype=str,
+                                   skip_header=1)[:, -1]
 
-    # for i, text in enumerate(benchmark_data):
-    #     tts(text)
+    for i, text in enumerate(benchmark_data):
+        tts(text)
 
 
-    ttsapi = TTSServer()
-    server = ls.LitServer(ttsapi,
-                          max_batch_size=1,
-                          batch_timeout=1.0,
-                          accelerator="gpu",
-                          callbacks=[InferenceTimeLogger()],
-                          loggers=FileLogger())
+    # ttsapi = TTSServer()
+    # server = ls.LitServer(ttsapi,
+    #                       max_batch_size=1,
+    #                       batch_timeout=1.0,
+    #                       accelerator="gpu",
+    #                       callbacks=[InferenceTimeLogger()],
+    #                       loggers=FileLogger())
 
-    server.run(port=7008)
+    # server.run(port=7008)
