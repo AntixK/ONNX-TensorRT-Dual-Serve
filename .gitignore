@@ -171,3 +171,5 @@ pretrained_models/
 cmudict/
 output/
 logs/
+
+datasets_dir/

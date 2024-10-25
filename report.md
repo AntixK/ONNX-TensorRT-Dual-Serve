@@ -14,7 +14,7 @@ The [HiFi-GAN](https://arxiv.org/abs/2010.05646) model is converted to the ONNX 
 A reason for the above choice is that the FastPitch model, with the current code, cannot be directly converted to ONNX model. In retrospect, I could have used the model from NVIDIA's Nemo library. They do provide the [code](https://github.com/NVIDIA/NeMo/blob/f45f56bb3730939f43ef2a8656bf8075d615f361/nemo/collections/tts/models/fastpitch.py) for the FastPitch model that can be exported to ONNX.
 
 
-The two models, after their respective conversions, can be chained together to for an end-to-end text-to-speech system. The FastPitch TensorRT model can as is - calling the infer function with the encoded input text. The HiFi-GAN ONNX model can be used with the `onnxruntime` - creating an inference session. I have used both TensorRT and CUDA as execution providers for faster inference on the GPU. Since the output of the FastPitch model still remains on the same GPU, the ONNX Inference session can be directly bound to the output tensor by name (Hence, we used the legacy `torch.onnx.export` api). Similarly, the output of the ONNX model can be exported to the host memory by name. 
+The two models, after their respective conversions, can be chained together to for an end-to-end text-to-speech system. The FastPitch TensorRT model can as is - calling the infer function with the encoded input text. The HiFi-GAN ONNX model can be used with the `onnxruntime` - creating an inference session. I have used both TensorRT and CUDA as execution providers for faster inference on the GPU. Since the output of the FastPitch model still remains on the same GPU, the ONNX Inference session can be directly bound to the output tensor by name (Hence, we used the legacy `torch.onnx.export` api). Similarly, the output of the ONNX model can be exported to the host memory by name.
 
 
 For the servering the above TTS model, we shall use [LitServe](https://github.com/Lightning-AI/LitServe) framework. The client library is a simple python script that sends a text to the server and receives the audio waveform via the `requests` library. These are available in the `client.py` and `tts_server.py` files respectively.
@@ -126,9 +126,70 @@ FastPitch (TensorRT) + HiFi-GAN (ONNX) (without denoising)
 
 The memory snapshot file is also available under `assets/gpu_mem_snapshot.pickle` and can be visualized using the [PyTorch memory vix](https://pytorch.org/memory_viz).
 
-### Issues Faced
 
-The above FastPitch + HiFiGAN pipeline model is also available as an example from NVIDIA, and can be found [here](https://github.com/NVIDIA/DeepLearningExamples/tree/master/PyTorch/SpeechSynthesis/FastPitch). However, I couldn't get the Triton Inference Server to work properly - as the `model.py` is missing a few functions. 
+## Triton Server (WIP)
+Triton Tree structure
+```
+├── docker-compose.yaml
+├── dockerfile
+├── fastpitch
+│   ├── 1
+│   │   ├── fastpitch.onnx
+│   │   └── fastpitch_trt.plan
+│   └── config.pbtxt
+├── hifigan
+│   ├── 1
+│   │   └── hifigan.onnx
+│   └── config.pbtxt
+└── tts_model
+    └── config.pbtxt
+```
+
+FastPitch ONNX
+```
+$ polygraphy inspect model pretrained_models/fastpitch.onnx --model-type onnx
+[I] Loading model: /home/antixk/Anand/Projects/ONNX-TensorRT-Dual-Serve/pretrained_models/fastpitch.onnx
+[I] ==== ONNX Model ====
+    Name: main_graph | ONNX Opset: 17
+
+    ---- 2 Graph Input(s) ----
+    {text [dtype=int64, shape=('batch_size', 122)],
+     pace [dtype=float64, shape=()]}
+
+    ---- 5 Graph Output(s) ----
+    {mel [dtype=float32, shape=('batch_size', 80, 'Transposemel_dim_2')],
+     seq_lens [dtype=int64, shape=('ReduceSumseq_lens_dim_0',)],
+     dur_pred.3 [dtype=float32, shape=('ReduceSumseq_lens_dim_0', 'Castdur_pred.3_dim_1')],
+     input.236 [dtype=float32, shape=('Transposeinput.236_dim_0', 1, 'Transposeinput.236_dim_2')],
+     onnx::Unsqueeze_1227 [dtype=float32, shape=('Squeezeonnx::Unsqueeze_1227_dim_0', 'Squeezeonnx::Unsqueeze_1227_dim_1')]}
+
+    ---- 170 Initializer(s) ----
+
+    ---- 1872 Node(s) ----
+```
+HifiGAN ONNX
+```
+$ polygraphy inspect model pretrained_models/hifigan.onnx --model-type onnx
+[I] Loading model: /home/antixk/Anand/Projects/ONNX-TensorRT-Dual-Serve/pretrained_models/hifigan.onnx
+[I] ==== ONNX Model ====
+    Name: main_graph | ONNX Opset: 17
+
+    ---- 1 Graph Input(s) ----
+    {mel [dtype=float32, shape=('batch_size', 80, 661)]}
+
+    ---- 1 Graph Output(s) ----
+    {audio [dtype=float32, shape=('batch_size', 1, 169216)]}
+
+    ---- 156 Initializer(s) ----
+
+    ---- 208 Node(s) ----
+```
+
+Launching triton server
+
+```
+docker run --gpus all --rm --runtime=nvidia --env CUDA_VISIBLE_DEVICES=0 -p 8000:8000 -p 8001:8001 -p 8002:8002 -v tts_triton:/models nvcr.io/nvidia/tritonserver:24.09-py3 tritonserver --model-repository=/models --disable-auto-complete-config
+```
 
 ### Future Improvements
 To improve the latency, the following can be done
@@ -143,4 +204,3 @@ To improve the latency, the following can be done
 3. https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/core/export.html
 4. https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/tts/checkpoints.html
 5. https://github.com/NVIDIA/DeepLearningExamples/tree/master/PyTorch/SpeechSynthesis/FastPitch
-
