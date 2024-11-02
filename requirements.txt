@@ -1,4 +1,4 @@
-git+https://github.com/NVIDIA/dllogger@v1.0.0#egg=dllogger
+# git+https://github.com/NVIDIA/dllogger@v1.0.0#egg=dllogger
 python-box
 numpy
 scipy
@@ -6,4 +6,7 @@ inflect
 loguru
 pydantic
 litserve
+librosa==0.9.0
+torch == 2.5.0
 onnxruntime-gpu==1.19.2
+onnx

@@ -7,7 +7,7 @@ services:
 
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: dockerfile-pytorch
     ports:
       - "7008:7008"
 

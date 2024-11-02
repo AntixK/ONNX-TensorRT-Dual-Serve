@@ -64,7 +64,7 @@ inference:
   input_file: "phrases/benchmark_8_128.tsv"
   output_dir: "output"
   log_dir: "logs"
-  use_amp: True
+  use_amp: False
   use_cuda: True
   batch_size: 32
   warmup_steps: 20
@@ -80,7 +80,7 @@ inference:
   hop_length: 256
   fade_out: 0
   affinity: "single"
-  l2_promote: True
+  l2_promote: False
   hifigan: "pretrained_models/hifigan/hifigan_gen_checkpoint_10000_ft.pt"
   fastpitch: "pretrained_models/fastpitch/nvidia_fastpitch_210824.pt"
   symbol_set: "english_basic"

@@ -52,3 +52,6 @@ python client.py
 nsys stats --force-export=true --report cuda_gpu_sum --report cuda_gpu_mem_time_sum --report cuda_gpu_mem_size_sum --report cuda_api_sum --format csv,column --output .,- report2.nsys-rep
 ```
 
+
+
+1. Aysync Requests
