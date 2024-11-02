@@ -123,10 +123,10 @@ def convert_fastpitch(model_args:Box, args: Box, device = "cuda"):
                         input_names = ['text'],
                         output_names = ['mel'],
                         dynamic_axes={'text' : {0 : 'batch_size',
-                                                # 1 : "seq_length",
+                                                1 : "seq_length",
                         },
                                        'mel' : {0 : "batch_size",
-                                                # 2 : "mel_length",
+                                                2 : "mel_length",
                                        }},
     )
 
