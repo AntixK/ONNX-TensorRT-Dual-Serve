@@ -11,7 +11,7 @@ from common.text import cmudict
 from box import Box
 from pathlib import Path
 from typing import Union
-from convert_models import convert_fastpitch
+# from convert_models import convert_fastpitch
 import torch
 
 from torch.nn.utils.rnn import pad_sequence
@@ -51,62 +51,61 @@ config = get_args(Path("config.yaml"))
 args: Box = config.inference
 model_args: Box = config.model_config
 
-cmudict.initialize(args.cmudict_path, args.heteronyms_path)
-
-tp = get_text_processing(args.symbol_set,
-                         args.text_cleaners,
-                         args.p_arpabet)
-
-text = "His disappearance gave color and substance to evil reports already in circulation that the will and conveyance above referred to"
-encoded_text = np.asarray(tp.encode_text(text)).reshape(1, -1)
-
-# encoded_text = [torch.LongTensor(tp.encode_text(text))]
-# encoded_text = pad_sequence(encoded_text, batch_first=True)
-
-# print(encoded_text.shape)
-
-encoded_text = np.random.rand(2, 122).astype(np.int32)
-# encoded_text = np.array([tp.encode_text(text)], dtype=np.int32)
-pace = np.array(1.0, dtype=np.float32)
-
-print(encoded_text.shape)
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-convert_fastpitch(model_args, args, device)
-
-# Create ONNXRuntime Session for FastPitch
-options = ort.SessionOptions()
-options.enable_profiling=False
-# options.log_severity=0# options.log_verbosity_level0
-
-
-ort_session = ort.InferenceSession( 'pretrained_models/fastpitch.onnx',
-    sess_options=options,
-    providers=[ 'CUDAExecutionProvider'])
-
-# print(dir(ort_session))
-# print(ort_session.get_inputs())
-# print(ort_session.get_outputs())
-io_binding = ort_session.io_binding()
-
-encoded_text = ort.OrtValue.ortvalue_from_numpy(encoded_text)
-pace = ort.OrtValue.ortvalue_from_numpy(pace)
-
-# ortvalue.device_name()  # 'cpu'
-# ortvalue.shape()        # shape of the numpy array X
-# ortvalue.data_type()    # 'tensor(float)'
-# ortvalue.is_tensor()    # 'True'
-# np.array_equal(ortvalue.numpy(), X)  # 'True'
-
-results = ort_session.run(["mel"], {"text": encoded_text, "pace": pace})
-
-print(results)
 
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
 runtime = trt.Runtime(TRT_LOGGER)
+trt.init_libnvinfer_plugins(TRT_LOGGER, namespace="")
+
+onnxfile = "pretrained_models/hifigan.onnx"
+# # Sanity check
+# onnx_model = onnx.load(onnxfile)
+# onnx.checker.check_model(onnx_model)
+# del onnx_model
+
+major, minor, patch = trt.__version__.split('.')
+
+logger.info(f"TensorRT Version: {major}.{minor}.{patch}")
+EXPLICIT_BATCH = 1 << (int)(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH) #we have enabled the explicit Batch
+
+
+# with (trt.Builder(TRT_LOGGER) as builder, 
+#       builder.create_network() as network, 
+#       trt.OnnxParser(network, TRT_LOGGER) as parser, 
+#       builder.create_builder_config() as builder_config):
+#     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1<< 31)
+
+#     # if args.use_amp:
+#     #     logger.info("Using FP16 Precision")
+#     #     builder_config.set_flag(trt.BuilderFlag.FP16)
+
+#     logger.info("Parsing ONNX file.")
+#     with open(onnxfile, 'rb') as model:
+#         if not parser.parse(model.read()):
+#             for error in range(parser.num_errors):
+#                 logger.error(parser.get_error(error))
+#             logger.error("Failed to parse ONNX file.")
+#             raise Exception("Failed to parse ONNX file.")
+
+#     # Set dynamic shapes
+#     logger.info("Setting optimization profile.")
+#     profile = builder.create_optimization_profile()
+#     # TODO: Set proper dynamic shapes
+#     profile.set_shape("spec", (1, 80, 161), (4, 80, 261), (8, 80, 861))
+
+#     builder_config.add_optimization_profile(profile)
+#     builder_config.default_device_type = trt.DeviceType.GPU
+
+#     logger.info("Building TensorRT engine. This may take a few minutes.")
+#     serialized_engine = builder.build_serialized_network(network, builder_config)
+
+#     with open('pretrained_models/hifigan.plan', 'wb') as f:
+#         f.write(serialized_engine)
+#         logger.info("TensorRT engine saved to pretrained_models/hifigan.plan")
+
 
 with open("pretrained_models/hifigan.plan", "rb") as f:
     serialized_engine = f.read()
+    logger.info("Engine loaded successfully")
 
 engine = runtime.deserialize_cuda_engine(serialized_engine)
 context = engine.create_execution_context()
@@ -120,19 +119,22 @@ for i in range(engine.num_io_tensors):
 
 # class
 
-def infer(mel: np.array):
+def infer(spec: np.array):
     # https://github.com/NVIDIA/TensorRT/issues/4230
     # Actual shapes of the inputs
-    input_shapes = mel.shape
+    input_shapes = spec.shape
 
     B = input_shapes[0]
     inputs = []
     outputs = []
     bindings = []
-    context.set_input_shape("mel", mel.shape)
+    context.set_input_shape("spec", spec.shape)
+    # print(context.get_tensor_shape("audio"))
+    context.infer_shapes()
 
     for i in range(engine.num_io_tensors):
         tensor_name = engine.get_tensor_name(i)
+        # print(tensor_name)
         dtype = trt.nptype(engine.get_tensor_dtype(tensor_name))
 
         # Check if it's an input or output tensor
@@ -144,9 +146,11 @@ def infer(mel: np.array):
             device_mem = cuda.mem_alloc(host_mem.nbytes)
             inputs.append(HostDeviceMem(host_mem, device_mem))
             bindings.append(int(device_mem))
+
             np.copyto(inputs[-1].host, locals()[tensor_name].ravel())
         else:
-            temp_shape = (B, *engine.get_tensor_shape(tensor_name)[1:])
+            temp_shape = context.get_tensor_shape(tensor_name)
+            
             # temp_shape = (1,)  # Placeholder, adjust if necessary
             size = trt.volume(temp_shape)
             # print(temp_shape, size, dtype)
@@ -182,8 +186,7 @@ def cleanup():
 
 
 # Run inference
-mel = np.random.rand(2, 80, 661).astype(np.float32)
-audio = np.random.rand(1, 2, 16).astype(np.float32)
+mel = np.random.rand(2, 80, 361).astype(np.float32)
 start_time = perf_counter()
 output = infer(mel)
 end_time = perf_counter()
