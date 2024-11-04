@@ -53,10 +53,8 @@ model_args: Box = config.model_config
 
 
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-runtime = trt.Runtime(TRT_LOGGER)
 trt.init_libnvinfer_plugins(TRT_LOGGER, namespace="")
 
-onnxfile = "pretrained_models/hifigan.onnx"
 # # Sanity check
 # onnx_model = onnx.load(onnxfile)
 # onnx.checker.check_model(onnx_model)
@@ -67,7 +65,7 @@ major, minor, patch = trt.__version__.split('.')
 logger.info(f"TensorRT Version: {major}.{minor}.{patch}")
 EXPLICIT_BATCH = 1 << (int)(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH) #we have enabled the explicit Batch
 
-
+# onnxfile = "pretrained_models/hifigan.onnx"
 # with (trt.Builder(TRT_LOGGER) as builder, 
 #       builder.create_network() as network, 
 #       trt.OnnxParser(network, TRT_LOGGER) as parser, 
@@ -103,18 +101,7 @@ EXPLICIT_BATCH = 1 << (int)(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH) #w
 #         logger.info("TensorRT engine saved to pretrained_models/hifigan.plan")
 
 
-with open("pretrained_models/hifigan.plan", "rb") as f:
-    serialized_engine = f.read()
-    logger.info("Engine loaded successfully")
 
-engine = runtime.deserialize_cuda_engine(serialized_engine)
-context = engine.create_execution_context()
-inputs, outputs, bindings = [], [], []
-stream = cuda.Stream()
-
-for i in range(engine.num_io_tensors):
-    tensor_name = engine.get_tensor_name(i)
-    logger.info(f"Tensor:{tensor_name}, Shape:{engine.get_tensor_shape(tensor_name)}")
 
 
 # class
@@ -184,17 +171,32 @@ def cleanup():
         output_mem.device.free()  # Free device memory for each output
 
 
+if __name__ == "__main__":
+    runtime = trt.Runtime(TRT_LOGGER)
+    with open("pretrained_models/hifigan.plan", "rb") as f:
+        serialized_engine = f.read()
+        logger.info("Engine loaded successfully")
 
-# Run inference
-mel = np.random.rand(2, 80, 361).astype(np.float32)
-start_time = perf_counter()
-output = infer(mel)
-end_time = perf_counter()
-# print time in milliseconds
-print(f"Time taken:{(end_time - start_time) * 1000:.2f} ms")
-print("Output shape:", output.shape)
+    engine = runtime.deserialize_cuda_engine(serialized_engine)
+    context = engine.create_execution_context()
+    inputs, outputs, bindings = [], [], []
+    stream = cuda.Stream()
 
-print(output)
+    for i in range(engine.num_io_tensors):
+        tensor_name = engine.get_tensor_name(i)
+        logger.info(f"Tensor:{tensor_name}, Shape:{engine.get_tensor_shape(tensor_name)}")
 
-# Clean up memory after inference
-cleanup()
+
+    # Run inference
+    mel = np.random.rand(2, 80, 361).astype(np.float32)
+    start_time = perf_counter()
+    output = infer(mel)
+    end_time = perf_counter()
+    # print time in milliseconds
+    print(f"Time taken:{(end_time - start_time) * 1000:.2f} ms")
+    print("Output shape:", output.shape)
+
+    print(output)
+
+    # Clean up memory after inference
+    cleanup()
