@@ -196,6 +196,7 @@ class TTS:
                 outputs.append(HostDeviceMem(host_mem, device_mem))
                 bindings.append(int(device_mem))
 
+        logger.info(f"Transferring {len(inputs)} inputs to GPU")
         # Transfer inputs to device
         for i in range(len(inputs)):
             cuda.memcpy_htod_async(inputs[i].device, inputs[i].host, self.stream)
@@ -204,8 +205,10 @@ class TTS:
         for i in range(self.engine.num_io_tensors):
             self.trt_context.set_tensor_address(self.engine.get_tensor_name(i), bindings[i])
 
+        logger.info("Executing HiFiGAN Inference")
         self.trt_context.execute_async_v3(self.stream.handle)
 
+        logger.info("Transferring output back to host")
         # Transfer predictions back
         cuda.memcpy_dtoh_async(outputs[0].host, outputs[0].device, self.stream)
 
@@ -290,6 +293,7 @@ class TTS:
             self.trt_buffer.free()
         # if self.onnx_buffer:
         #     self.onnx_buffer.free()
+        logger.info("Closing CUDA Context")
         self.cuda_context.pop()
 
 
@@ -301,7 +305,7 @@ if __name__ == "__main__":
     spec = tts.infer_fastpitch(text)
     # print(spec.shape)
     audio = tts.infer_hifigan(spec)
-    print(audio)
+    print(audio.shape)
     tts.cleanup()
 
     # with GPUPartitionManager() as gpu_manager:
