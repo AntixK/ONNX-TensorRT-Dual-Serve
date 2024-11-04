@@ -7,8 +7,6 @@ import onnxruntime as ort
 from pathlib import Path 
 from typing import Tuple
 
-print(trt.__version__)
-
 class HostDeviceMem(object):
     def __init__(self, host_mem, device_mem):
         """Within this context, host_mom means the cpu memory and device means the GPU memory"""
@@ -137,6 +135,7 @@ class TTS:
                 logger.info("HiFiGAN TensorRT engine saved to pretrained_models/hifigan.plan")
 
     def infer_fastpitch(self, encoded_text: str, pace:float = 1.0, pitch:float = 1.0):
+        logger.info("Running FastPitch Inference")
         self.cuda_context.synchronize()
         # encoded_text = fastpitch.parse(text).detach().cpu().numpy()
         # print(encoded_text.shape)
@@ -147,13 +146,19 @@ class TTS:
         pace = ort.OrtValue.ortvalue_from_numpy(pace)
         pitch = ort.OrtValue.ortvalue_from_numpy(pitch)
 
+        logger.info(f"{len(self.ort_session.get_inputs())}")
+        logger.info(f"{self.ort_session.get_outputs()[0].shape}")
+
         results = self.ort_session.run(None, input_feed= {"text": encoded_text, "pitch":pitch, "pace": pace})
 
         spec = results[0]
 
+        logger.info(f"FastPitch Inference Complete. Shape: {spec.shape}")
+
         return spec
 
     def infer_hifigan(self, spec: np.array):
+        logger.info("Running HiFiGAN Inference")
         self.cuda_context.synchronize()
         input_shapes = spec.shape
 
@@ -209,6 +214,77 @@ class TTS:
 
         return outputs[0].host
 
+    def run_pipeline(self, inputs:dict):
+        # Step 1: ONNX Inference
+        # Bind input to ONNX
+        io_binding = self.ort_session.io_binding()
+
+        input_names = [input.name for input in self.ort_session.get_inputs()]
+        output_names = [output.name for output in self.ort_session.get_outputs()]
+
+        
+        for input_name in input_names:
+            data = inputs[input_name]
+            # Allocate and copy input data to GPU
+            d_input = cuda.mem_alloc(data.nbytes)
+            cuda.memcpy_htod(d_input, data)
+
+            io_binding.bind_input(
+                name=input_name,
+                device_type='cuda',
+                device_id=0,
+                element_type=np.float32,
+                shape=data.shape,
+                buffer_ptr=int(d_input)
+            )
+        
+        # for output_name in output_names:
+
+
+        # Get ONNX output shape and allocate intermediate buffer
+        onnx_output_shape = self.ort_session.get_outputs()[0].shape
+        # if not self.intermediate_buffer:
+        #     intermediate_size = np.prod(onnx_output_shape) * np.dtype(np.float32).itemsize
+        #     self.intermediate_buffer = cuda.mem_alloc(intermediate_size)
+        
+        # Bind ONNX output to intermediate buffer
+        io_binding.bind_output(
+            name=output_name,
+            device_type='cuda',
+            device_id=0,
+            element_type=np.float32,
+            shape=onnx_output_shape,
+            buffer_ptr=int(self.intermediate_buffer)
+        )
+        
+        # Run ONNX inference
+        self.ort_session.run_with_iobinding(io_binding)
+        self.cuda_context.synchronize()
+        
+        # Free input buffer
+        d_input.free()
+        
+        # Step 2: TensorRT Inference
+        # Get TensorRT output shape and allocate output buffer
+        output_idx = 1  # Assuming single output
+        trt_output_shape = self.trt_context.engine.get_binding_shape(output_idx)
+        h_output = cuda.pagelocked_empty(tuple(trt_output_shape), dtype=np.float32)
+        d_output = cuda.mem_alloc(h_output.nbytes)
+        
+        # Run TensorRT inference using intermediate buffer as input
+        bindings = [int(self.intermediate_buffer), int(d_output)]
+        self.trt_context.execute_v2(bindings)
+        
+        # Copy final output back to host
+        cuda.memcpy_dtoh(h_output, d_output)
+        self.context.synchronize()
+        
+        # Free output buffer
+        d_output.free()
+        
+        return h_output
+    
+
     def cleanup(self):
         if self.trt_buffer:
             self.trt_buffer.free()
@@ -221,8 +297,9 @@ if __name__ == "__main__":
     tts = TTS()
     text = "Hello, how are you doing today?"
     text = np.random.randint(0, 100, (1, 122))
-    print(text.shape)
+    # print(text.shape)
     spec = tts.infer_fastpitch(text)
+    # print(spec.shape)
     audio = tts.infer_hifigan(spec)
     print(audio)
     tts.cleanup()
